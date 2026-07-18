@@ -21,6 +21,11 @@ from pumpfun_bigquery_export import (
 )
 
 
+HISTORICAL_WITHDRAW_DISCRIMINATOR = bytes.fromhex(
+    "b712469c946da122"
+)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -340,6 +345,16 @@ def main() -> int:
     )
 
     instruction_map, idl_sha256 = load_pump_idl()
+
+    # Güncel IDL'de bulunmayan eski Pump.fun withdraw
+    # instruction'ını tarihsel taramalar için tanıyoruz.
+    instruction_map.setdefault(
+        HISTORICAL_WITHDRAW_DISCRIMINATOR,
+        {
+            "name": "withdraw",
+            "accounts": [],
+        },
+    )
 
     client = bigquery.Client(
         project=args.project
