@@ -11,7 +11,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Repoyu çek
@@ -27,27 +27,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Dosyaları ve ortamı kontrol et
+      - name: Dosyaları ve secretları kontrol et
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
           set -euxo pipefail
+
           python --version
           node --version
           npm --version
 
           test -n "${GMGN_API_KEY:-}"
+          test -n "${SUPABASE_URL:-}"
+          test -n "${SUPABASE_SECRET_KEY:-}"
+
           test -f scripts/run_scan.py
+          test -f scripts/push_to_supabase.py
           test -f config/watchlist.txt
 
-          echo "Watchlist satır sayısı:"
+          echo "Watchlist wallet sayısı:"
           grep -vE '^\s*(#|$)' config/watchlist.txt | wc -l
 
-      - name: Taramayı çalıştır
+      - name: GMGN wallet taramasını çalıştır
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
         run: |
           set -euxo pipefail
+
           python -u scripts/run_scan.py
 
           echo "Üretilen sonuç dosyaları:"
@@ -55,10 +63,18 @@ jobs:
 
           test -n "$(find results/raw -type f -name '*.json' -print -quit)"
 
-      - name: Sonuçları indirilebilir dosya olarak yükle
+      - name: Ham sonuçları indirilebilir dosya olarak yükle
         uses: actions/upload-artifact@v4
         with:
           name: gmgn-wallet-scan-results
           path: results/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Sonuçları Supabase veritabanına kaydet
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          set -euxo pipefail
+          python -u scripts/push_to_supabase.py
