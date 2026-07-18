@@ -1,0 +1,67 @@
+name: Pump.fun Range Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Başlangıç UTC tarihi (YYYY-MM-DD)"
+        required: true
+        default: "2024-01-19"
+        type: string
+
+      end_date:
+        description: "Bitiş UTC tarihi, dahil (YYYY-MM-DD)"
+        required: true
+        default: "2024-01-25"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Google Cloud kimlik doğrulaması
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python paketlerini kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            google-cloud-bigquery \
+            base58
+
+      - name: Pump.fun tarih aralığını tara
+        env:
+          GCP_PROJECT_ID: solana-wallet-research
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          python scripts/pumpfun_range_backfill.py \
+            --project "$GCP_PROJECT_ID" \
+            --start-date "$START_DATE" \
+            --end-date "$END_DATE" \
+            --output-dir artifacts/pumpfun-backfill
+
+      - name: Backfill dosyalarını yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pumpfun-backfill-${{ inputs.start_date }}-${{ inputs.end_date }}
+          path: artifacts/pumpfun-backfill/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
