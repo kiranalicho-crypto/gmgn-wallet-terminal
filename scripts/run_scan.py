@@ -1,5 +1,5 @@
 """
-GitHub Actions üzerinde periyodik çalışacak GMGN wallet tarama scripti.
+GitHub Actions üzerinde periyodik çalışacak GMGN Solana wallet tarama scripti.
 
 Gerekli ortam değişkeni:
     GMGN_API_KEY
@@ -29,7 +29,7 @@ RESULTS_DIR = ROOT / "results"
 
 
 def load_watchlist() -> list[str]:
-    """Watchlist dosyasındaki yorum ve boş satırlar dışındaki adresleri döndürür."""
+    """Watchlist içindeki geçerli wallet adreslerini yükler."""
 
     if not WATCHLIST_PATH.exists():
         raise FileNotFoundError(
@@ -53,7 +53,7 @@ def load_watchlist() -> list[str]:
 
 
 def run_gmgn_cli(wallet: str) -> dict[str, Any]:
-    """Tek bir wallet için GMGN CLI sorgusu çalıştırır."""
+    """Tek bir Solana wallet adresi için GMGN CLI sorgusu çalıştırır."""
 
     command = [
         "npx",
@@ -61,6 +61,8 @@ def run_gmgn_cli(wallet: str) -> dict[str, Any]:
         "gmgn-cli",
         "portfolio",
         "stats",
+        "--chain",
+        "sol",
         "--wallet",
         wallet,
         "--raw",
@@ -151,14 +153,14 @@ def run_gmgn_cli(wallet: str) -> dict[str, Any]:
 
 
 def write_text_file(path: Path, content: str) -> None:
-    """Metin dosyasını UTF-8 olarak yazar."""
+    """Metin dosyasını UTF-8 olarak kaydeder."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
 def write_json_file(path: Path, data: Any) -> None:
-    """JSON dosyasını UTF-8 olarak yazar."""
+    """JSON dosyasını UTF-8 olarak kaydeder."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -233,6 +235,7 @@ def main() -> None:
             stdout_path,
             str(result.get("stdout", "")),
         )
+
         write_text_file(
             stderr_path,
             str(result.get("stderr", "")),
