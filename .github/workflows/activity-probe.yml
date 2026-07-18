@@ -8,11 +8,15 @@ permissions:
 
 jobs:
   activity-probe:
+    name: Activity ve Deployer Analizi
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
     steps:
-      - name: Repoyu çek
+      - name: Repository dosyalarını al
         uses: actions/checkout@v4
 
       - name: Node.js kur
@@ -25,41 +29,64 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Dosyaları ve API anahtarını kontrol et
-        env:
-          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+      - name: Secret kontrolü
+        shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          python --version
-          node --version
-          npm --version
+          if [ -z "${GMGN_API_KEY:-}" ]; then
+            echo "GMGN_API_KEY GitHub Secret bulunamadı."
+            exit 1
+          fi
 
-          test -n "${GMGN_API_KEY:-}"
-          test -f scripts/activity_probe.py
-          test -f config/watchlist.txt
-
-          echo "Test wallet sayısı:"
-          grep -vE '^\s*(#|$)' config/watchlist.txt | wc -l
+          echo "GMGN_API_KEY mevcut."
 
       - name: Tam activity geçmişini çek
-        env:
-          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        shell: bash
         run: |
-          set -euxo pipefail
-
+          set -euo pipefail
           python -u scripts/activity_probe.py
 
-          echo "Activity çıktı dosyaları:"
+      - name: Deployer profilini oluştur
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u scripts/deployer_profiler.py
+
+      - name: Çıktıları doğrula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPORT_FILE="$(find results/activity_probe -type f -name 'completeness_report.json' -print -quit)"
+          ACTIVITY_FILE="$(find results/activity_probe -type f -name 'all_activities_with_exact_dedup.json' -print -quit)"
+          RAW_ACTIVITY_FILE="$(find results/activity_probe -type f -name 'all_activities_raw.json' -print -quit)"
+          DEPLOYER_SUMMARY_FILE="$(find results/activity_probe -type f -name 'deployer_summary.json' -print -quit)"
+          DEPLOYER_TOKENS_FILE="$(find results/activity_probe -type f -name 'deployer_tokens.json' -print -quit)"
+          DEPLOYER_CSV_FILE="$(find results/activity_probe -type f -name 'deployer_tokens.csv' -print -quit)"
+
+          test -n "$REPORT_FILE"
+          test -n "$ACTIVITY_FILE"
+          test -n "$RAW_ACTIVITY_FILE"
+          test -n "$DEPLOYER_SUMMARY_FILE"
+          test -n "$DEPLOYER_TOKENS_FILE"
+          test -n "$DEPLOYER_CSV_FILE"
+
+          echo "Activity raporu: $REPORT_FILE"
+          echo "Activity verisi: $ACTIVITY_FILE"
+          echo "Ham activity verisi: $RAW_ACTIVITY_FILE"
+          echo "Deployer özeti: $DEPLOYER_SUMMARY_FILE"
+          echo "Deployer tokenları: $DEPLOYER_TOKENS_FILE"
+          echo "Deployer CSV: $DEPLOYER_CSV_FILE"
+
+          echo "Oluşturulan dosyalar:"
           find results/activity_probe -maxdepth 5 -type f -print
 
-          test -n "$(find results/activity_probe -type f -name 'completeness_report.json' -print -quit)"
-          test -n "$(find results/activity_probe -type f -name 'all_activities_with_exact_dedup.json' -print -quit)"
-
-      - name: Activity sonuçlarını indirilebilir dosya olarak yükle
+      - name: Sonuçları artifact olarak yükle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gmgn-activity-probe-results
           path: results/activity_probe/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
