@@ -25,6 +25,21 @@ HISTORICAL_WITHDRAW_DISCRIMINATOR = bytes.fromhex(
     "b712469c946da122"
 )
 
+HISTORICAL_WITHDRAW_ACCOUNTS = [
+    {"name": "global"},
+    {"name": "last_withdraw"},
+    {"name": "mint"},
+    {"name": "bonding_curve"},
+    {"name": "associated_bonding_curve"},
+    {"name": "associated_user"},
+    {"name": "user"},
+    {"name": "system_program"},
+    {"name": "token_program"},
+    {"name": "rent"},
+    {"name": "event_authority"},
+    {"name": "program"},
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -92,9 +107,10 @@ def instruction_category(
     ):
         return "sell"
 
-    if normalized == "migrate" or normalized.startswith(
-        "migrate_"
-    ):
+    if normalized in {"migrate", "withdraw"}:
+        return "migrate"
+
+    if normalized.startswith("migrate_"):
         return "migrate"
 
     return "other"
@@ -296,6 +312,18 @@ def export_query_to_csv(
     return row_count
 
 
+def scalar_count(
+    connection: sqlite3.Connection,
+    sql: str,
+) -> int:
+    row = connection.execute(sql).fetchone()
+
+    if row is None:
+        return 0
+
+    return int(row[0])
+
+
 def main() -> int:
     args = parse_args()
 
@@ -334,9 +362,14 @@ def main() -> int:
         / f"pumpfun_creates_{range_name}.csv"
     )
 
-    first_buys_csv_path = (
+    eligible_first_buys_csv_path = (
         output_dir
-        / f"pumpfun_first_buys_{range_name}.csv"
+        / f"pumpfun_eligible_first_buys_{range_name}.csv"
+    )
+
+    out_of_scope_first_buys_csv_path = (
+        output_dir
+        / f"pumpfun_out_of_scope_first_buys_{range_name}.csv"
     )
 
     migrations_csv_path = (
@@ -346,13 +379,13 @@ def main() -> int:
 
     instruction_map, idl_sha256 = load_pump_idl()
 
-    # Güncel IDL'de bulunmayan eski Pump.fun withdraw
+    # Güncel IDL'de bulunmayan eski Raydium migration
     # instruction'ını tarihsel taramalar için tanıyoruz.
     instruction_map.setdefault(
         HISTORICAL_WITHDRAW_DISCRIMINATOR,
         {
             "name": "withdraw",
-            "accounts": [],
+            "accounts": HISTORICAL_WITHDRAW_ACCOUNTS,
         },
     )
 
@@ -370,7 +403,7 @@ def main() -> int:
 
     daily_results: list[dict[str, Any]] = []
     empty_days: list[str] = []
-    missing_mint_rows: list[dict[str, Any]] = []
+    missing_required_account_rows: list[dict[str, Any]] = []
 
     total_rows = 0
     total_estimated_bytes = 0
@@ -494,6 +527,7 @@ def main() -> int:
                 "buyer",
                 "seller",
                 "payer",
+                "withdraw_authority",
             )
 
             creator = choose_account(
@@ -520,17 +554,15 @@ def main() -> int:
                 "create",
                 "buy",
                 "sell",
+                "migrate",
             } and not mint:
-                missing_mint_rows.append(
+                missing_required_account_rows.append(
                     {
                         "scan_date": scan_date.isoformat(),
                         "tx_signature": tx_signature,
-                        "instruction_index": (
-                            instruction_index
-                        ),
-                        "instruction_name": (
-                            instruction_name
-                        ),
+                        "instruction_index": instruction_index,
+                        "instruction_name": instruction_name,
+                        "missing_field": "mint",
                     }
                 )
 
@@ -582,7 +614,7 @@ def main() -> int:
                     ),
                 )
 
-            elif category == "migrate" and mint:
+            elif category == "migrate":
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO migrations (
@@ -633,9 +665,7 @@ def main() -> int:
                     daily_unknowns.items()
                 )
             ),
-            "estimated_bytes_processed": (
-                estimated_bytes
-            ),
+            "estimated_bytes_processed": estimated_bytes,
         }
 
         daily_results.append(
@@ -666,20 +696,55 @@ def main() -> int:
         creates_csv_path,
     )
 
-    first_buys_count = export_query_to_csv(
+    raw_first_buys_count = scalar_count(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM first_buys
+        """,
+    )
+
+    eligible_first_buys_count = export_query_to_csv(
         connection,
         """
         SELECT
-            mint,
-            wallet,
-            first_buy_at_utc,
-            first_buy_tx,
-            bonding_curve,
-            instruction_name
-        FROM first_buys
-        ORDER BY first_buy_at_utc, mint, wallet
+            f.mint,
+            f.wallet,
+            f.first_buy_at_utc,
+            f.first_buy_tx,
+            f.bonding_curve,
+            f.instruction_name
+        FROM first_buys AS f
+        INNER JOIN creates AS c
+            ON c.mint = f.mint
+        ORDER BY
+            f.first_buy_at_utc,
+            f.mint,
+            f.wallet
         """,
-        first_buys_csv_path,
+        eligible_first_buys_csv_path,
+    )
+
+    out_of_scope_first_buys_count = export_query_to_csv(
+        connection,
+        """
+        SELECT
+            f.mint,
+            f.wallet,
+            f.first_buy_at_utc,
+            f.first_buy_tx,
+            f.bonding_curve,
+            f.instruction_name
+        FROM first_buys AS f
+        LEFT JOIN creates AS c
+            ON c.mint = f.mint
+        WHERE c.mint IS NULL
+        ORDER BY
+            f.first_buy_at_utc,
+            f.mint,
+            f.wallet
+        """,
+        out_of_scope_first_buys_csv_path,
     )
 
     migrations_count = export_query_to_csv(
@@ -697,13 +762,24 @@ def main() -> int:
         migrations_csv_path,
     )
 
+    database_integrity = connection.execute(
+        "PRAGMA integrity_check"
+    ).fetchone()
+
     connection.close()
+
+    integrity_status = (
+        str(database_integrity[0])
+        if database_integrity
+        else "unknown"
+    )
 
     manifest = {
         "start_date_utc": start_date.isoformat(),
         "end_date_utc": end_date.isoformat(),
         "program_id": PUMP_PROGRAM_ID,
         "idl_sha256": idl_sha256,
+        "database_integrity": integrity_status,
         "total_rows": total_rows,
         "total_instruction_counts": dict(
             sorted(
@@ -716,18 +792,24 @@ def main() -> int:
             )
         ),
         "creates_count": creates_count,
-        "first_buys_count": first_buys_count,
+        "raw_first_buys_count": raw_first_buys_count,
+        "eligible_first_buys_count": (
+            eligible_first_buys_count
+        ),
+        "out_of_scope_first_buys_count": (
+            out_of_scope_first_buys_count
+        ),
         "migrations_count": migrations_count,
         "unknown_discriminators": dict(
             sorted(
                 unknown_discriminators.items()
             )
         ),
-        "missing_mint_row_count": len(
-            missing_mint_rows
+        "missing_required_account_row_count": len(
+            missing_required_account_rows
         ),
-        "missing_mint_rows_sample": (
-            missing_mint_rows[:100]
+        "missing_required_account_rows_sample": (
+            missing_required_account_rows[:100]
         ),
         "empty_days": empty_days,
         "total_estimated_bytes_processed": (
@@ -742,12 +824,13 @@ def main() -> int:
         "files": {
             "database": database_path.name,
             "creates_csv": creates_csv_path.name,
-            "first_buys_csv": (
-                first_buys_csv_path.name
+            "eligible_first_buys_csv": (
+                eligible_first_buys_csv_path.name
             ),
-            "migrations_csv": (
-                migrations_csv_path.name
+            "out_of_scope_first_buys_csv": (
+                out_of_scope_first_buys_csv_path.name
             ),
+            "migrations_csv": migrations_csv_path.name,
         },
     }
 
@@ -780,10 +863,10 @@ def main() -> int:
 
         return 2
 
-    if missing_mint_rows:
+    if missing_required_account_rows:
         print(
-            "Create/buy/sell kayıtlarında "
-            "mint hesabı çözülemeyen satırlar var.",
+            "Gerekli mint hesabı çözülemeyen "
+            "create/buy/sell/migration kayıtları var.",
             file=sys.stderr,
         )
 
@@ -797,6 +880,26 @@ def main() -> int:
         )
 
         return 4
+
+    if integrity_status != "ok":
+        print(
+            "SQLite bütünlük kontrolü başarısız.",
+            file=sys.stderr,
+        )
+
+        return 5
+
+    if (
+        raw_first_buys_count
+        != eligible_first_buys_count
+        + out_of_scope_first_buys_count
+    ):
+        print(
+            "First-buy kapsam sayımları tutarsız.",
+            file=sys.stderr,
+        )
+
+        return 6
 
     print("PUMPFUN_RANGE_BACKFILL_OK")
 
