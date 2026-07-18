@@ -3,33 +3,62 @@ name: GMGN Wallet Scan
 on:
   schedule:
     - cron: "0 6 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - name: Repoyu çek
         uses: actions/checkout@v4
+
       - name: Node.js kur
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
       - name: Python kur
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Dosyaları ve ortamı kontrol et
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: |
+          set -euxo pipefail
+          python --version
+          node --version
+          npm --version
+
+          test -n "${GMGN_API_KEY:-}"
+          test -f scripts/run_scan.py
+          test -f config/watchlist.txt
+
+          echo "Watchlist satır sayısı:"
+          grep -vE '^\s*(#|$)' config/watchlist.txt | wc -l
+
       - name: Taramayı çalıştır
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
-        run: python scripts/run_scan.py
-      - name: Sonuçları commit et
         run: |
-          git config user.name "gmgn-scan-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add results/
-          git diff --cached --quiet || git commit -m "Otomatik tarama sonucu"
-          git push
+          set -euxo pipefail
+          python -u scripts/run_scan.py
+
+          echo "Üretilen sonuç dosyaları:"
+          find results -maxdepth 4 -type f -print
+
+          test -n "$(find results/raw -type f -name '*.json' -print -quit)"
+
+      - name: Sonuçları indirilebilir dosya olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-wallet-scan-results
+          path: results/
+          if-no-files-found: error
+          retention-days: 7
