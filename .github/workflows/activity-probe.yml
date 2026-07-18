@@ -54,7 +54,7 @@ jobs:
           find results/activity_probe -maxdepth 5 -type f -print
 
           test -n "$(find results/activity_probe -type f -name 'completeness_report.json' -print -quit)"
-          test -n "$(find results/activity_probe -type f -name 'all_activities.json' -print -quit)"
+          test -n "$(find results/activity_probe -type f -name 'all_activities_with_exact_dedup.json' -print -quit)"
 
       - name: Activity sonuçlarını indirilebilir dosya olarak yükle
         uses: actions/upload-artifact@v4
