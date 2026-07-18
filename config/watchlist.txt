@@ -1,1 +1,2 @@
 # Her satıra bir Solana wallet adresi ekle, başında # olan satırlar yorumdur
+yHCxHBEaJW5tbndqC8JciSThr7U1cqLpdcsvHcx6PRe
