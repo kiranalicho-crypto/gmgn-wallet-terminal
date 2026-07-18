@@ -1,0 +1,35 @@
+name: GMGN Wallet Scan
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repoyu çek
+        uses: actions/checkout@v4
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Taramayı çalıştır
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: python scripts/run_scan.py
+      - name: Sonuçları commit et
+        run: |
+          git config user.name "gmgn-scan-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add results/
+          git diff --cached --quiet || git commit -m "Otomatik tarama sonucu"
+          git push
