@@ -130,7 +130,6 @@ def query_day(
       i.block_timestamp >= @start_timestamp
       AND i.block_timestamp < @end_timestamp
       AND i.program_id = @program_id
-      AND t.err IS NULL
     ORDER BY
       i.block_timestamp,
       i.tx_signature,
