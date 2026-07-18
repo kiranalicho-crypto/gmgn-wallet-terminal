@@ -1,21 +1,25 @@
 """
-GMGN portfolio activity pagination testi.
+GMGN portfolio activity pagination ve veri bütünlüğü testi.
 
-Amaç:
-- config/watchlist.txt içindeki ilk wallet adresini okur.
-- GMGN portfolio activity sorgusunu çalıştırır.
-- `next` cursor bitene kadar bütün sayfaları çeker.
-- Her ham sayfayı ayrı JSON dosyasında saklar.
-- Tüm aktiviteleri birleşik JSONL dosyasına yazar.
-- Pagination ve veri tamlığı raporu üretir.
+Bu sürüm:
+- Bütün activity sayfalarını cursor bitene kadar çeker.
+- Her ham sayfayı değiştirmeden saklar.
+- Aynı transaction içindeki launch, buy, sell ve liquidity eventlerini ayrı tutar.
+- Yalnızca içeriği birebir aynı olan kayıtları duplicate kabul eder.
+- Gerçek GMGN alanları olan tx_hash ve event_type alanlarını destekler.
+- Deployer analizi için bütün eventleri eksiksiz korur.
 
 Gerekli ortam değişkeni:
     GMGN_API_KEY
 
+Watchlist:
+    config/watchlist.txt
+
 Çıktılar:
-    results/activity_probe/<run_timestamp>/
+    results/activity_probe/<çalışma_zamanı>/
 """
 
+import hashlib
 import json
 import os
 import re
@@ -75,7 +79,11 @@ def extract_reset_timestamp(text: str) -> int | None:
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
 
         if match:
             try:
@@ -118,7 +126,7 @@ def run_activity_command(
             (
                 "ACTIVITY_REQUEST | "
                 f"attempt={attempt}/{MAX_REQUEST_ATTEMPTS} | "
-                f"cursor={'FIRST_PAGE' if not cursor else cursor[:30]}"
+                f"cursor={'FIRST_PAGE' if not cursor else cursor[:40]}"
             ),
             flush=True,
         )
@@ -152,8 +160,7 @@ def run_activity_command(
                 )
 
             try:
-                return json.loads(stdout)
-
+                parsed = json.loads(stdout)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
                     (
@@ -163,16 +170,27 @@ def run_activity_command(
                     )
                 ) from exc
 
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    "GMGN activity cevabının üst seviyesi JSON nesnesi değil."
+                )
+
+            return parsed
+
         combined_error = f"{stderr}\n{stdout}".strip()
 
-        if "429" in combined_error or "RATE_LIMIT" in combined_error.upper():
-            reset_timestamp = extract_reset_timestamp(combined_error)
+        if (
+            "429" in combined_error
+            or "RATE_LIMIT" in combined_error.upper()
+        ):
+            reset_timestamp = extract_reset_timestamp(
+                combined_error
+            )
 
             if reset_timestamp:
-                now_timestamp = int(time.time())
                 wait_seconds = max(
                     1,
-                    reset_timestamp - now_timestamp + 2,
+                    reset_timestamp - int(time.time()) + 2,
                 )
             else:
                 wait_seconds = 60
@@ -207,32 +225,29 @@ def normalize_response(
     raw_response: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], str | None]:
     """
-    Resmî şema üst seviyede activities ve next alanlarını belirtir.
+    Activity dizisini ve sonraki cursor değerini bulur.
 
-    CLI farklı bir sürümde bunları data altında döndürürse,
-    ham veriyi bozmadan bu ihtimali de destekler.
+    Hem üst seviye hem de data içindeki olası şemayı destekler.
+    Ham veriyi değiştirmez.
     """
 
-    response_container: dict[str, Any] = raw_response
+    container: dict[str, Any] = raw_response
 
-    if isinstance(raw_response.get("data"), dict):
-        nested_data = raw_response["data"]
+    nested_data = raw_response.get("data")
 
+    if isinstance(nested_data, dict):
         if (
             "activities" in nested_data
             or "next" in nested_data
         ):
-            response_container = nested_data
+            container = nested_data
 
-    activities = response_container.get("activities")
-    next_cursor = response_container.get("next")
+    activities = container.get("activities")
+    next_cursor = container.get("next")
 
     if activities is None:
         raise RuntimeError(
-            (
-                "GMGN cevabında 'activities' alanı bulunamadı. "
-                "Ham sayfa dosyası incelenmeli."
-            )
+            "GMGN cevabında 'activities' alanı bulunamadı."
         )
 
     if not isinstance(activities, list):
@@ -243,40 +258,141 @@ def normalize_response(
             )
         )
 
+    valid_activities: list[dict[str, Any]] = []
+
+    for activity in activities:
+        if isinstance(activity, dict):
+            valid_activities.append(activity)
+
     if next_cursor in ("", None, False):
-        next_cursor = None
-    elif not isinstance(next_cursor, str):
-        next_cursor = str(next_cursor)
+        normalized_cursor = None
+    else:
+        normalized_cursor = str(next_cursor)
 
-    return activities, next_cursor
+    return valid_activities, normalized_cursor
 
 
-def activity_identity(
+def exact_event_identity(
     activity: dict[str, Any],
 ) -> str:
+    """
+    Yalnızca tamamen aynı JSON içeriğine sahip eventleri duplicate sayar.
+
+    Böylece aynı tx_hash içindeki:
+    - launch
+    - buy
+    - sell
+    - add_liquidity
+    gibi farklı eventler kesinlikle birleşmez.
+    """
+
+    canonical_json = json.dumps(
+        activity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    return hashlib.sha256(
+        canonical_json.encode("utf-8")
+    ).hexdigest()
+
+
+def get_event_type(activity: dict[str, Any]) -> str:
+    value = (
+        activity.get("event_type")
+        or activity.get("type")
+        or activity.get("activity_type")
+        or "unknown"
+    )
+
+    return str(value).lower()
+
+
+def get_tx_hash(activity: dict[str, Any]) -> str | None:
+    value = (
+        activity.get("tx_hash")
+        or activity.get("transaction_hash")
+        or activity.get("transaction_signature")
+        or activity.get("signature")
+    )
+
+    if value in (None, ""):
+        return None
+
+    return str(value)
+
+
+def get_token_address(activity: dict[str, Any]) -> str | None:
     token = activity.get("token")
 
-    token_address = None
-
     if isinstance(token, dict):
-        token_address = token.get("address")
+        value = (
+            token.get("address")
+            or token.get("mint")
+            or token.get("mint_address")
+        )
 
-    identity_parts = [
-        activity.get("transaction_hash"),
-        activity.get("type"),
-        token_address,
+        if value not in (None, ""):
+            return str(value)
+
+    value = (
+        activity.get("token_address")
+        or activity.get("token_mint")
+        or activity.get("mint")
+    )
+
+    if value in (None, ""):
+        return None
+
+    return str(value)
+
+
+def get_timestamp(activity: dict[str, Any]) -> float | None:
+    candidates = [
         activity.get("timestamp"),
-        activity.get("token_amount"),
+        activity.get("block_timestamp"),
+        activity.get("block_time"),
+        activity.get("time"),
     ]
 
-    return "|".join(
-        "" if value is None else str(value)
-        for value in identity_parts
-    )
+    for value in candidates:
+        if value in (None, ""):
+            continue
+
+        try:
+            timestamp = float(value)
+
+            if timestamp > 10_000_000_000:
+                timestamp = timestamp / 1000
+
+            return timestamp
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def timestamp_to_iso(
+    timestamp: float | None,
+) -> str | None:
+    if timestamp is None:
+        return None
+
+    try:
+        return datetime.fromtimestamp(
+            timestamp,
+            tz=timezone.utc,
+        ).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def main() -> None:
-    api_key = os.environ.get("GMGN_API_KEY", "").strip()
+    api_key = os.environ.get(
+        "GMGN_API_KEY",
+        "",
+    ).strip()
 
     if not api_key:
         print(
@@ -305,16 +421,17 @@ def main() -> None:
 
     all_activities: list[dict[str, Any]] = []
     unique_activities: list[dict[str, Any]] = []
+    duplicate_records: list[dict[str, Any]] = []
 
-    seen_activity_ids: set[str] = set()
+    seen_exact_event_ids: set[str] = set()
     seen_cursors: set[str] = set()
 
     cursor: str | None = None
     page_number = 0
     pagination_complete = False
-    duplicate_count = 0
-    first_timestamp: int | float | None = None
-    last_timestamp: int | float | None = None
+
+    first_timestamp: float | None = None
+    last_timestamp: float | None = None
 
     while page_number < MAX_PAGES:
         page_number += 1
@@ -323,7 +440,7 @@ def main() -> None:
             (
                 "FETCH_PAGE | "
                 f"page={page_number} | "
-                f"cursor={'FIRST_PAGE' if cursor is None else cursor[:30]}"
+                f"cursor={'FIRST_PAGE' if cursor is None else cursor[:40]}"
             ),
             flush=True,
         )
@@ -333,8 +450,8 @@ def main() -> None:
             cursor=cursor,
         )
 
-        raw_page_path = pages_dir / (
-            f"page_{page_number:04d}.json"
+        raw_page_path = (
+            pages_dir / f"page_{page_number:04d}.json"
         )
 
         write_json(
@@ -359,35 +476,40 @@ def main() -> None:
         all_activities.extend(activities)
 
         for activity in activities:
-            if not isinstance(activity, dict):
-                continue
+            timestamp = get_timestamp(activity)
 
-            timestamp = activity.get("timestamp")
-
-            if isinstance(timestamp, (int, float)):
-                if first_timestamp is None:
+            if timestamp is not None:
+                if (
+                    first_timestamp is None
+                    or timestamp < first_timestamp
+                ):
                     first_timestamp = timestamp
 
-                first_timestamp = min(
-                    first_timestamp,
-                    timestamp,
-                )
-
-                if last_timestamp is None:
+                if (
+                    last_timestamp is None
+                    or timestamp > last_timestamp
+                ):
                     last_timestamp = timestamp
 
-                last_timestamp = max(
-                    last_timestamp,
-                    timestamp,
+            exact_identity = exact_event_identity(
+                activity
+            )
+
+            if exact_identity in seen_exact_event_ids:
+                duplicate_records.append(
+                    {
+                        "exact_identity": exact_identity,
+                        "tx_hash": get_tx_hash(activity),
+                        "event_type": get_event_type(activity),
+                        "token_address": get_token_address(
+                            activity
+                        ),
+                        "activity": activity,
+                    }
                 )
-
-            identity = activity_identity(activity)
-
-            if identity in seen_activity_ids:
-                duplicate_count += 1
                 continue
 
-            seen_activity_ids.add(identity)
+            seen_exact_event_ids.add(exact_identity)
             unique_activities.append(activity)
 
         if not next_cursor:
@@ -416,14 +538,36 @@ def main() -> None:
             )
         )
 
-    combined_json_path = run_dir / "all_activities.json"
+    all_activities_path = (
+        run_dir / "all_activities_with_exact_dedup.json"
+    )
 
     write_json(
-        combined_json_path,
+        all_activities_path,
         unique_activities,
     )
 
-    jsonl_path = run_dir / "all_activities.jsonl"
+    raw_all_activities_path = (
+        run_dir / "all_activities_raw.json"
+    )
+
+    write_json(
+        raw_all_activities_path,
+        all_activities,
+    )
+
+    duplicates_path = (
+        run_dir / "exact_duplicate_records.json"
+    )
+
+    write_json(
+        duplicates_path,
+        duplicate_records,
+    )
+
+    jsonl_path = (
+        run_dir / "all_activities_with_exact_dedup.jsonl"
+    )
 
     with jsonl_path.open(
         "w",
@@ -438,42 +582,81 @@ def main() -> None:
             )
             jsonl_file.write("\n")
 
-    activity_type_counts: dict[str, int] = {}
+    event_type_counts: dict[str, int] = {}
+    transaction_hashes: set[str] = set()
+    token_addresses: set[str] = set()
 
     for activity in unique_activities:
-        activity_type = str(
-            activity.get("type") or "unknown"
+        event_type = get_event_type(activity)
+
+        event_type_counts[event_type] = (
+            event_type_counts.get(event_type, 0) + 1
         )
 
-        activity_type_counts[activity_type] = (
-            activity_type_counts.get(activity_type, 0) + 1
-        )
+        tx_hash = get_tx_hash(activity)
+
+        if tx_hash:
+            transaction_hashes.add(tx_hash)
+
+        token_address = get_token_address(activity)
+
+        if token_address:
+            token_addresses.add(token_address)
 
     report = {
         "wallet_address": wallet,
         "run_timestamp_utc": run_timestamp,
         "page_limit": PAGE_LIMIT,
         "pages_fetched": page_number,
-        "records_fetched_before_dedup": len(all_activities),
-        "unique_records": len(unique_activities),
-        "duplicate_records": duplicate_count,
+        "records_fetched_raw": len(all_activities),
+        "records_after_exact_dedup": len(
+            unique_activities
+        ),
+        "exact_duplicate_count": len(
+            duplicate_records
+        ),
         "pagination_complete": pagination_complete,
         "final_cursor": cursor,
+        "unique_transaction_count": len(
+            transaction_hashes
+        ),
+        "unique_token_count": len(
+            token_addresses
+        ),
         "first_activity_timestamp": first_timestamp,
+        "first_activity_utc": timestamp_to_iso(
+            first_timestamp
+        ),
         "last_activity_timestamp": last_timestamp,
-        "activity_type_counts": activity_type_counts,
+        "last_activity_utc": timestamp_to_iso(
+            last_timestamp
+        ),
+        "event_type_counts": event_type_counts,
         "raw_pages_directory": str(
             pages_dir.relative_to(ROOT)
         ),
-        "combined_json_file": str(
-            combined_json_path.relative_to(ROOT)
+        "all_raw_activities_file": str(
+            raw_all_activities_path.relative_to(ROOT)
         ),
-        "combined_jsonl_file": str(
+        "exact_dedup_activities_file": str(
+            all_activities_path.relative_to(ROOT)
+        ),
+        "exact_duplicates_file": str(
+            duplicates_path.relative_to(ROOT)
+        ),
+        "jsonl_file": str(
             jsonl_path.relative_to(ROOT)
+        ),
+        "deduplication_method": (
+            "Yalnızca canonical tam JSON içeriği birebir aynı olan "
+            "eventler duplicate kabul edilir. Aynı tx_hash içindeki "
+            "farklı event_type kayıtları ayrı tutulur."
         ),
     }
 
-    report_path = run_dir / "completeness_report.json"
+    report_path = (
+        run_dir / "completeness_report.json"
+    )
 
     write_json(
         report_path,
@@ -493,7 +676,9 @@ def main() -> None:
         (
             "ACTIVITY_PROBE_SUCCESS | "
             f"pages={page_number} | "
-            f"unique_records={len(unique_activities)}"
+            f"raw_records={len(all_activities)} | "
+            f"records_after_exact_dedup={len(unique_activities)} | "
+            f"exact_duplicates={len(duplicate_records)}"
         ),
         flush=True,
     )
