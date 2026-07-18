@@ -66,3 +66,79 @@ def main():
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     successes = []
+        failures = []
+
+    print(f"SCAN_START | wallet_sayisi={len(wallets)}", flush=True)
+    print(f"Sonuç klasörü: {raw_dir}", flush=True)
+
+    for index, wallet in enumerate(wallets, start=1):
+        print(
+            f"Taranıyor: {index}/{len(wallets)} | {wallet}",
+            flush=True,
+        )
+
+        success, response = run_gmgn_cli(wallet)
+
+        if success:
+            output_path = raw_dir / f"{wallet}.json"
+            output_path.write_text(
+                json.dumps(response, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            successes.append({
+                "wallet": wallet,
+                "output_file": str(output_path.relative_to(ROOT)),
+            })
+
+            print(
+                f"SCAN_OK | {wallet} | {output_path}",
+                flush=True,
+            )
+        else:
+            failures.append({
+                "wallet": wallet,
+                "error": response,
+            })
+
+            print(
+                f"SCAN_ERROR | {wallet} | {response}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        time.sleep(1)
+
+    summary = {
+        "run_date_utc": run_date,
+        "wallet_count": len(wallets),
+        "success_count": len(successes),
+        "failure_count": len(failures),
+        "successes": successes,
+        "failures": failures,
+    }
+
+    summary_path = RESULTS_DIR / f"summary_{run_date}.json"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        flush=True,
+    )
+
+    if not successes:
+        print(
+            "SCAN_FAILED | Hiçbir wallet için JSON üretilemedi.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+    print("SCAN_SUCCESS", flush=True)
+
+
+if __name__ == "__main__":
+    main()
