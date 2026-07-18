@@ -1,0 +1,65 @@
+name: GMGN Activity Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  activity-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Repoyu çek
+        uses: actions/checkout@v4
+
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dosyaları ve API anahtarını kontrol et
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: |
+          set -euxo pipefail
+
+          python --version
+          node --version
+          npm --version
+
+          test -n "${GMGN_API_KEY:-}"
+          test -f scripts/activity_probe.py
+          test -f config/watchlist.txt
+
+          echo "Test wallet sayısı:"
+          grep -vE '^\s*(#|$)' config/watchlist.txt | wc -l
+
+      - name: Tam activity geçmişini çek
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+        run: |
+          set -euxo pipefail
+
+          python -u scripts/activity_probe.py
+
+          echo "Activity çıktı dosyaları:"
+          find results/activity_probe -maxdepth 5 -type f -print
+
+          test -n "$(find results/activity_probe -type f -name 'completeness_report.json' -print -quit)"
+          test -n "$(find results/activity_probe -type f -name 'all_activities.json' -print -quit)"
+
+      - name: Activity sonuçlarını indirilebilir dosya olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-activity-probe-results
+          path: results/activity_probe/
+          if-no-files-found: error
+          retention-days: 7
