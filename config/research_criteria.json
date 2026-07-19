@@ -1,0 +1,12 @@
+{
+  "version": "ATH10M_MC50K_X25_Y75K_v1",
+  "chain": "sol",
+  "origin": "Pump.fun",
+  "start_date_utc": "2024-01-19",
+  "min_ath_market_cap_usd": 10000000,
+  "max_first_buy_market_cap_usd": 50000,
+  "min_x_realized_multiple": 25,
+  "min_y_realized_profit_usd": 75000,
+  "x_and_y_must_differ": true,
+  "transfers_count_as_buys": false
+}
