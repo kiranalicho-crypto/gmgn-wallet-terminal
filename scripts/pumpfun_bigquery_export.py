@@ -291,6 +291,26 @@ def main() -> int:
         load_pump_idl()
     )
 
+    instruction_map.setdefault(
+        bytes.fromhex("b712469c946da122"),
+        {
+            "name": "withdraw",
+            "accounts": [
+                {"name": "global"},
+                {"name": "mint"},
+                {"name": "bonding_curve"},
+                {"name": "associated_bonding_curve"},
+                {"name": "associated_user"},
+                {"name": "user"},
+                {"name": "system_program"},
+                {"name": "token_program"},
+                {"name": "rent"},
+                {"name": "event_authority"},
+                {"name": "program"},
+            ],
+        },
+    )
+
     client = bigquery.Client(
         project=args.project
     )

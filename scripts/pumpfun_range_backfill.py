@@ -27,7 +27,6 @@ HISTORICAL_WITHDRAW_DISCRIMINATOR = bytes.fromhex(
 
 HISTORICAL_WITHDRAW_ACCOUNTS = [
     {"name": "global"},
-    {"name": "last_withdraw"},
     {"name": "mint"},
     {"name": "bonding_curve"},
     {"name": "associated_bonding_curve"},
