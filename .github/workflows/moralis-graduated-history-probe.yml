@@ -1,0 +1,125 @@
+name: Moralis Graduated History Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope_start_date:
+        description: "Tarihsel erişimin ulaşması gereken başlangıç tarihi"
+        required: true
+        default: "2026-01-01"
+        type: string
+      scope_end_date:
+        description: "Çıktıya dahil edilecek son tarih"
+        required: true
+        default: "2026-07-18"
+        type: string
+      max_pages:
+        description: "Güvenlik için en fazla cursor sayfası"
+        required: true
+        default: "400"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Moralis tarihsel kapsamını doğrula
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Bağımlılıkları kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Dosya ve secret kontrolü
+        run: |
+          set -euo pipefail
+          test -f scripts/moralis_graduated_history_probe.py
+          test -n "$MORALIS_API_KEY"
+
+      - name: Probe sürümünü doğrula
+        run: |
+          set -euo pipefail
+          VERSION="$(python scripts/moralis_graduated_history_probe.py --version)"
+          echo "Probe version: $VERSION"
+          test "$VERSION" = "2026-07-19-moralis-graduated-history-probe-v1"
+
+      - name: Moralis cursor geçmişini tara
+        id: history_probe
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -u scripts/moralis_graduated_history_probe.py \
+            --scope-start-date "${{ inputs.scope_start_date }}" \
+            --scope-end-date "${{ inputs.scope_end_date }}" \
+            --max-pages "${{ inputs.max_pages }}" \
+            --page-size 100 \
+            --output-dir artifacts/moralis-graduated-history-probe \
+            --strict
+
+      - name: Rapor özetini göster
+        if: always() && hashFiles('artifacts/moralis-graduated-history-probe/moralis_graduated_history_report.json') != ''
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/moralis-graduated-history-probe/moralis_graduated_history_report.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          print("pages_requested=", report["pagination"]["pages_requested"])
+          print("stop_reason=", report["pagination"]["stop_reason"])
+          print("reached_scope_start=", report["pagination"]["reached_scope_start"])
+          print("ordering_newest_to_oldest=", report["pagination"]["ordering_newest_to_oldest"])
+          print("unique_token_address_count=", report["counts"]["unique_token_address_count"])
+          print("in_scope_graduated_token_count=", report["counts"]["in_scope_graduated_token_count"])
+          print("duplicate_token_address_count=", report["counts"]["duplicate_token_address_count"])
+          print("invalid_row_count=", report["counts"]["invalid_row_count"])
+          print("earliest_graduated_at_utc=", report["coverage"]["earliest_graduated_at_utc"])
+          print("historical_boundary_proven=", report["coverage"]["historical_boundary_proven"])
+          print("complete=", report["complete"])
+          PY
+
+      - name: Probe çıktılarını yükle
+        if: always() && hashFiles('artifacts/moralis-graduated-history-probe/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: moralis-graduated-history-probe-results
+          path: artifacts/moralis-graduated-history-probe/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Eksiksizlik kapısı
+        if: always()
+        run: |
+          set -euo pipefail
+          test "${{ steps.history_probe.outcome }}" = "success"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/moralis-graduated-history-probe/moralis_graduated_history_report.json")
+          if not path.is_file():
+              raise SystemExit("Moralis history raporu üretilmedi.")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          if report.get("complete") is not True:
+              raise SystemExit("Moralis, 2026-01-01 tarih sınırına güvenilir biçimde ulaşamadı.")
+          print("MORALIS_HISTORY_GATE_OK")
+          PY
