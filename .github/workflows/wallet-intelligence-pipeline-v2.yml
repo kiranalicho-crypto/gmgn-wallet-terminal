@@ -1,0 +1,166 @@
+name: Wallet Intelligence Pipeline v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Başlangıç UTC (YYYY-MM-DD)"
+        required: true
+        default: "2024-01-19"
+        type: string
+      end_date:
+        description: "Bitiş UTC, dahil (YYYY-MM-DD)"
+        required: true
+        default: "2024-01-25"
+        type: string
+      min_ath_mc:
+        description: "Minimum ATH market cap USD"
+        required: true
+        default: "10000000"
+        type: string
+      max_early_buy_mc:
+        description: "Maksimum ilk alım market cap USD"
+        required: true
+        default: "50000"
+        type: string
+      min_x_multiple:
+        description: "Minimum X realized multiple"
+        required: true
+        default: "25"
+        type: string
+      min_y_profit:
+        description: "Minimum Y realized PnL USD"
+        required: true
+        default: "75000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GCP_PROJECT_ID: solana-wallet-research
+      GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Google Cloud kimlik doğrulaması
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Node.js 24 kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Bağımlılıkları kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          npx --yes gmgn-cli --version
+
+      - name: Secret kontrolü
+        run: |
+          set -euo pipefail
+          test -n "${GMGN_API_KEY:-}" || (echo "GMGN_API_KEY eksik" && exit 1)
+
+      - name: Pump.fun tarih aralığını tara
+        run: |
+          set -euo pipefail
+          python -u scripts/pumpfun_range_backfill.py \
+            --project "$GCP_PROJECT_ID" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --output-dir artifacts/backfill
+
+      - name: Backfill çıktı yollarını bul
+        id: paths
+        run: |
+          set -euo pipefail
+          CREATES="$(find artifacts/backfill -name 'pumpfun_creates_*.csv' -print -quit)"
+          MIGRATIONS="$(find artifacts/backfill -name 'pumpfun_migrations_*.csv' -print -quit)"
+          FIRST_BUYS="$(find artifacts/backfill -name 'pumpfun_eligible_first_buys_*.csv' -print -quit)"
+          test -n "$CREATES" && test -n "$MIGRATIONS" && test -n "$FIRST_BUYS"
+          echo "creates=$CREATES" >> "$GITHUB_OUTPUT"
+          echo "migrations=$MIGRATIONS" >> "$GITHUB_OUTPUT"
+          echo "first_buys=$FIRST_BUYS" >> "$GITHUB_OUTPUT"
+
+      - name: ATH filtresi sürümünü doğrula
+        run: |
+          set -euo pipefail
+          VERSION="$(python scripts/ath_filter_v3.py --version)"
+          echo "ATH filter version: $VERSION"
+          test "$VERSION" = "2026-07-19-v3"
+
+      - name: ATH verisini çöz ve 10M filtresini uygula
+        id: ath
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -u scripts/ath_filter_v3.py \
+            --creates "${{ steps.paths.outputs.creates }}" \
+            --migrations "${{ steps.paths.outputs.migrations }}" \
+            --output-dir artifacts/ath \
+            --min-ath-mc "${{ inputs.min_ath_mc }}" \
+            --strict
+
+      - name: Wallet X/Y kriter taraması
+        id: candidates
+        if: always() && hashFiles('artifacts/ath/eligible_ath_tokens.csv') != ''
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -u scripts/candidate_wallet_scan.py \
+            --eligible-tokens artifacts/ath/eligible_ath_tokens.csv \
+            --first-buys "${{ steps.paths.outputs.first_buys }}" \
+            --output-dir artifacts/candidates \
+            --min-ath-mc "${{ inputs.min_ath_mc }}" \
+            --max-early-buy-mc "${{ inputs.max_early_buy_mc }}" \
+            --min-x-realized-multiple "${{ inputs.min_x_multiple }}" \
+            --min-y-realized-profit "${{ inputs.min_y_profit }}" \
+            --strict
+
+      - name: Bütün çıktıları yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-intelligence-${{ inputs.start_date }}-${{ inputs.end_date }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Eksiksizlik kapısı
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          ath = Path("artifacts/ath/ath_manifest.json")
+          candidates = Path("artifacts/candidates/candidate_manifest.json")
+          if not ath.is_file():
+              raise SystemExit("ATH manifest üretilmedi.")
+          ath_data = json.loads(ath.read_text())
+          if ath_data.get("complete") is not True:
+              raise SystemExit("ATH çözümü eksik; unresolved CSV'yi incele.")
+          if not candidates.is_file():
+              raise SystemExit("Candidate manifest üretilmedi.")
+          candidate_data = json.loads(candidates.read_text())
+          if candidate_data.get("complete") is not True:
+              raise SystemExit("Wallet taraması eksik; unresolved CSV'yi incele.")
+          print("WALLET_INTELLIGENCE_PIPELINE_OK")
+          PY
