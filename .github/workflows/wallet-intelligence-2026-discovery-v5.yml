@@ -1,0 +1,314 @@
+name: Wallet Intelligence 2026 Discovery v5
+
+on:
+  workflow_dispatch:
+    inputs:
+      maximum_bytes_billed_per_month:
+        description: "Her aylık ana BigQuery sorgusu için sert byte limiti"
+        required: true
+        default: "150000000000"
+        type: string
+      maximum_total_estimated_bytes:
+        description: "Yedi aylık ana sorguların toplam dry-run sert limiti"
+        required: true
+        default: "700000000000"
+        type: string
+      status_maximum_bytes_billed_per_query:
+        description: "Her günlük transaction-status sorgusu için sert byte limiti"
+        required: true
+        default: "10000000000"
+        type: string
+      fallback_maximum_bytes_billed:
+        description: "Metadata fallback sorgusu için sert byte limiti"
+        required: true
+        default: "100000000000"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT_ID: solana-wallet-research
+  SCOPE_START_DATE: "2026-01-01"
+  SCOPE_END_DATE: "2026-07-18"
+
+jobs:
+  preflight:
+    name: Preflight 2026 discovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Google Cloud kimlik doğrulaması
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Bağımlılıkları kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Yedi aylık dry-run tahminlerini çıkar
+        run: |
+          set -euo pipefail
+          chunks=("2026-01" "2026-02" "2026-03" "2026-04" "2026-05" "2026-06" "2026-07-partial")
+          starts=("2026-01-01" "2026-02-01" "2026-03-01" "2026-04-01" "2026-05-01" "2026-06-01" "2026-07-01")
+          ends=("2026-01-31" "2026-02-28" "2026-03-31" "2026-04-30" "2026-05-31" "2026-06-30" "2026-07-18")
+          for i in "${!chunks[@]}"; do
+            python -u scripts/pumpfun_2026_discovery_chunk_v5.py \
+              --project "$GCP_PROJECT_ID" \
+              --chunk-id "${chunks[$i]}" \
+              --migration-start-date "${starts[$i]}" \
+              --migration-end-date "${ends[$i]}" \
+              --scope-start-date "$SCOPE_START_DATE" \
+              --scope-end-date "$SCOPE_END_DATE" \
+              --maximum-bytes-billed "${{ inputs.maximum_bytes_billed_per_month }}" \
+              --status-maximum-bytes-billed "${{ inputs.status_maximum_bytes_billed_per_query }}" \
+              --fallback-maximum-bytes-billed "${{ inputs.fallback_maximum_bytes_billed }}" \
+              --output-dir "artifacts/preflight/${chunks[$i]}" \
+              --dry-run-only
+          done
+
+      - name: Toplam dry-run kapısı
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = sorted(Path("artifacts/preflight").glob("*/preflight.json"))
+          if len(paths) != 7:
+              raise SystemExit(f"7 preflight bekleniyordu, bulunan: {len(paths)}")
+          rows = [json.loads(path.read_text()) for path in paths]
+          total = sum(int(row["estimated_main_query_bytes"]) for row in rows)
+          limit = int("${{ inputs.maximum_total_estimated_bytes }}")
+          report = {
+              "chunk_count": len(rows),
+              "estimated_total_main_query_bytes": total,
+              "maximum_total_estimated_bytes": limit,
+              "chunks": rows,
+              "complete": total <= limit,
+          }
+          Path("artifacts/preflight/preflight_summary.json").write_text(
+              json.dumps(report, ensure_ascii=False, indent=2)
+          )
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          if total > limit:
+              raise SystemExit("Toplam dry-run limiti aştı; hiçbir gerçek sorgu başlatılmadı.")
+          print("DISCOVERY_PREFLIGHT_OK")
+          PY
+
+      - name: Preflight çıktısını yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-intelligence-2026-discovery-preflight
+          path: artifacts/preflight/
+          if-no-files-found: error
+          retention-days: 30
+
+  discover-months:
+    needs: preflight
+    name: Discover ${{ matrix.chunk_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - chunk_id: "2026-01"
+            migration_start: "2026-01-01"
+            migration_end: "2026-01-31"
+          - chunk_id: "2026-02"
+            migration_start: "2026-02-01"
+            migration_end: "2026-02-28"
+          - chunk_id: "2026-03"
+            migration_start: "2026-03-01"
+            migration_end: "2026-03-31"
+          - chunk_id: "2026-04"
+            migration_start: "2026-04-01"
+            migration_end: "2026-04-30"
+          - chunk_id: "2026-05"
+            migration_start: "2026-05-01"
+            migration_end: "2026-05-31"
+          - chunk_id: "2026-06"
+            migration_start: "2026-06-01"
+            migration_end: "2026-06-30"
+          - chunk_id: "2026-07-partial"
+            migration_start: "2026-07-01"
+            migration_end: "2026-07-18"
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Google Cloud kimlik doğrulaması
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Bağımlılıkları kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Discovery sürümünü doğrula
+        run: |
+          set -euo pipefail
+          VERSION="$(python scripts/pumpfun_2026_discovery_chunk_v5.py --version \
+            --migration-start-date 2026-01-01 \
+            --migration-end-date 2026-01-01 \
+            --chunk-id version-check)"
+          echo "Discovery version: $VERSION"
+          test "$VERSION" = "2026-07-19-discovery-chunk-v5"
+
+      - name: Birim testleri çalıştır
+        run: |
+          set -euo pipefail
+          python -m pytest -q tests/test_2026_discovery_v5.py
+
+      - name: Aylık migration ve creator adaylarını çıkar
+        id: discovery
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -u scripts/pumpfun_2026_discovery_chunk_v5.py \
+            --project "$GCP_PROJECT_ID" \
+            --chunk-id "${{ matrix.chunk_id }}" \
+            --migration-start-date "${{ matrix.migration_start }}" \
+            --migration-end-date "${{ matrix.migration_end }}" \
+            --scope-start-date "$SCOPE_START_DATE" \
+            --scope-end-date "$SCOPE_END_DATE" \
+            --maximum-bytes-billed "${{ inputs.maximum_bytes_billed_per_month }}" \
+            --status-maximum-bytes-billed "${{ inputs.status_maximum_bytes_billed_per_query }}" \
+            --fallback-maximum-bytes-billed "${{ inputs.fallback_maximum_bytes_billed }}" \
+            --output-dir "artifacts/discovery-${{ matrix.chunk_id }}" \
+            --strict
+
+      - name: Aylık çıktıyı yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-intelligence-2026-discovery-chunk-${{ matrix.chunk_id }}
+          path: artifacts/discovery-${{ matrix.chunk_id }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Aylık eksiksizlik kapısı
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          chunk = "${{ matrix.chunk_id }}"
+          path = Path(f"artifacts/discovery-{chunk}/discovery_manifest.json")
+          if not path.is_file():
+              preflight = Path(f"artifacts/discovery-{chunk}/preflight.json")
+              if preflight.is_file():
+                  print(preflight.read_text())
+              raise SystemExit(f"{chunk}: discovery manifest üretilmedi.")
+          data = json.loads(path.read_text())
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          if data.get("complete") is not True:
+              raise SystemExit(f"{chunk}: discovery eksik.")
+          print(f"DISCOVERY_CHUNK_GATE_OK:{chunk}")
+          PY
+
+  merge-discovery:
+    name: Merge 2026 discovery
+    needs: discover-months
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Bağımlılıkları kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Aylık artifactleri indir
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wallet-intelligence-2026-discovery-chunk-*
+          path: artifacts/chunks
+          merge-multiple: false
+
+      - name: Birleşim sürümünü doğrula
+        run: |
+          set -euo pipefail
+          VERSION="$(python scripts/merge_2026_discovery_v5.py --version)"
+          echo "Merge version: $VERSION"
+          test "$VERSION" = "2026-07-19-discovery-merge-v5"
+
+      - name: Yedi ayı tekilleştir ve birleştir
+        id: merge
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -u scripts/merge_2026_discovery_v5.py \
+            --chunks-root artifacts/chunks \
+            --output-dir artifacts/discovery-merged \
+            --expected-chunks "2026-01,2026-02,2026-03,2026-04,2026-05,2026-06,2026-07-partial" \
+            --strict
+
+      - name: Birleşik çıktıyı yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-intelligence-2026-discovery-merged
+          path: artifacts/discovery-merged/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Birleşik eksiksizlik kapısı
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/discovery-merged/discovery_manifest.json")
+          if not path.is_file():
+              raise SystemExit("Birleşik discovery manifest üretilmedi.")
+          data = json.loads(path.read_text())
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          if data.get("complete") is not True:
+              raise SystemExit("2026 discovery eksik; birleşik artifact incelenmeli.")
+          print("WALLET_INTELLIGENCE_2026_DISCOVERY_V5_OK")
+          PY
