@@ -46,15 +46,23 @@ jobs:
         run: |
           set -euo pipefail
           test -f scripts/moralis_bigquery_reconciliation.py
-          test -f data/moralis_graduated_mints_2026.csv.gz
+          test -f data/moralis_graduated_mints_2026.csv
           VERSION="$(python scripts/moralis_bigquery_reconciliation.py --version)"
           echo "Script version: $VERSION"
-          test "$VERSION" = "2026-07-20-moralis-bigquery-reconciliation-v1"
+          test "$VERSION" = "2026-07-20-moralis-bigquery-reconciliation-v2"
 
       - name: Yalnızca BigQuery dry-run çalıştır
         run: |
           set -euo pipefail
-          python -u scripts/moralis_bigquery_reconciliation.py             --project "$GCP_PROJECT_ID"             --start-date "2026-01-01"             --end-date "2026-07-18"             --moralis-file data/moralis_graduated_mints_2026.csv.gz             --maximum-bytes-billed "${{ inputs.maximum_bytes_billed }}"             --output-dir artifacts/moralis-bigquery-reconciliation-dry-run             --dry-run-only             --strict
+          python -u scripts/moralis_bigquery_reconciliation.py \
+            --project "$GCP_PROJECT_ID" \
+            --start-date "2026-01-01" \
+            --end-date "2026-07-18" \
+            --moralis-file data/moralis_graduated_mints_2026.csv \
+            --maximum-bytes-billed "${{ inputs.maximum_bytes_billed }}" \
+            --output-dir artifacts/moralis-bigquery-reconciliation-dry-run \
+            --dry-run-only \
+            --strict
 
       - name: Dry-run çıktısını yükle
         if: always() && hashFiles('artifacts/moralis-bigquery-reconciliation-dry-run/**') != ''
