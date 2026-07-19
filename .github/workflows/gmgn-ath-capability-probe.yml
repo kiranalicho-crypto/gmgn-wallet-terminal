@@ -1,0 +1,99 @@
+name: GMGN ATH Capability Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      creator_wallet:
+        description: "ATH ve 100-kayıt sınırı testinde kullanılacak creator wallet"
+        required: true
+        default: "yHCxHBEaJW5tbndqC8JciSThr7U1cqLpdcsvHcx6PRe"
+        type: string
+      sample_count:
+        description: "token info ile karşılaştırılacak örnek token sayısı"
+        required: true
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: GMGN ATH yöntemini doğrula
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Node.js 22 kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dosya ve secret kontrolü
+        run: |
+          set -euo pipefail
+          test -f scripts/gmgn_ath_capability_probe.py
+          test -f scripts/gmgn_client.py
+          test -n "$GMGN_API_KEY"
+
+      - name: Güncel GMGN CLI kur
+        run: |
+          set -euo pipefail
+          npm install -g gmgn-cli
+          gmgn-cli --version
+
+      - name: Probe sürümünü doğrula
+        run: |
+          set -euo pipefail
+          VERSION="$(python scripts/gmgn_ath_capability_probe.py --version)"
+          echo "Probe version: $VERSION"
+          test "$VERSION" = "2026-07-19-gmgn-ath-capability-probe-v1"
+
+      - name: GMGN ATH capability probe çalıştır
+        run: |
+          set -euo pipefail
+          python -u scripts/gmgn_ath_capability_probe.py \
+            --creator-wallet "${{ inputs.creator_wallet }}" \
+            --sample-count "${{ inputs.sample_count }}" \
+            --output-dir artifacts/gmgn-ath-capability-probe
+
+      - name: Rapor özetini göster
+        if: always() && hashFiles('artifacts/gmgn-ath-capability-probe/gmgn_ath_capability_report.json') != ''
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/gmgn-ath-capability-probe/gmgn_ath_capability_report.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          created = data["created_tokens"]
+          formula = data["token_info_formula_test"]
+          print("returned_token_count=", created["returned_token_count"])
+          print("open_count=", created["open_count"])
+          print("inner_count=", created["inner_count"])
+          print("tokens_array_truncated=", created["tokens_array_truncated"])
+          print("pagination_like_top_level_keys=", created["pagination_like_top_level_keys"])
+          print("formula_supported=", formula["all_completed_matches_within_2_percent"])
+          PY
+
+      - name: Probe çıktılarını yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-ath-capability-probe-results
+          path: artifacts/gmgn-ath-capability-probe/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
