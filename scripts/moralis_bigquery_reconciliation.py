@@ -1,6 +1,6 @@
-"""Moralis graduated mint listesi için güvenli BigQuery dry-run.
+"""Moralis Pump.fun mezun token listesini BigQuery ile güvenli şekilde test eder.
 
-Bu sürüm yalnızca sorgu maliyetini tahmin eder. Gerçek veri sorgusu çalıştırmaz.
+Bu sürüm yalnızca dry-run yapar ve veri indirmez.
 """
 
 from __future__ import annotations
@@ -15,21 +15,22 @@ from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from google.api_core import exceptions as gexc
 from google.cloud import bigquery
 
 SCRIPT_VERSION = "2026-07-20-moralis-bigquery-reconciliation-v2"
 
-PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+BIGQUERY_LOCATION = "us-central1"
+
+INSTRUCTIONS_TABLE = (
+    "bigquery-public-data.crypto_solana_mainnet_us.Instructions"
+)
+
+PUMP_PROGRAM_ID = (
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+)
+
 MIGRATE_DATA_B58 = "Mjb79tJwDb7"
 WITHDRAW_DATA_B58 = "Xd2GMpFXgQ1"
-
-INSTRUCTIONS_TABLE_CANDIDATES = [
-    "bigquery-public-data.crypto_solana_mainnet_us.Instructions",
-    "bigquery-public-data.crypto_solana_mainnet_us.instructions",
-    "solana-data-sandbox.crypto_solana_mainnet_us.Instructions",
-    "solana-data-sandbox.crypto_solana_mainnet_us.instructions",
-]
 
 
 class ReconciliationError(RuntimeError):
@@ -38,34 +39,69 @@ class ReconciliationError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", action="store_true")
-    parser.add_argument("--project")
-    parser.add_argument("--start-date", default="2026-01-01")
-    parser.add_argument("--end-date", default="2026-07-18")
+
+    parser.add_argument(
+        "--version",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--project",
+    )
+
+    parser.add_argument(
+        "--start-date",
+        default="2026-01-01",
+    )
+
+    parser.add_argument(
+        "--end-date",
+        default="2026-07-18",
+    )
+
     parser.add_argument(
         "--moralis-file",
         default="data/moralis_graduated_mints_2026.csv",
     )
+
     parser.add_argument(
         "--output-dir",
-        default="artifacts/moralis-bigquery-reconciliation-dry-run",
+        default=(
+            "artifacts/"
+            "moralis-bigquery-reconciliation-dry-run"
+        ),
     )
+
     parser.add_argument(
         "--maximum-bytes-billed",
         type=int,
         default=700_000_000_000,
     )
+
     parser.add_argument(
         "--status-maximum-bytes-billed-per-query",
         type=int,
         default=10_000_000_000,
     )
-    parser.add_argument("--dry-run-only", action="store_true")
-    parser.add_argument("--strict", action="store_true")
+
+    parser.add_argument(
+        "--dry-run-only",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+    )
+
     return parser.parse_args()
 
 
-def utc_bounds(start_text: str, end_text: str) -> tuple[datetime, datetime]:
+def utc_bounds(
+    start_text: str,
+    end_text: str,
+) -> tuple[datetime, datetime]:
+
     start_day = date.fromisoformat(start_text)
     end_day = date.fromisoformat(end_text)
 
@@ -89,13 +125,17 @@ def utc_bounds(start_text: str, end_text: str) -> tuple[datetime, datetime]:
     return start, end
 
 
-def load_moralis(path: Path) -> tuple[int, str]:
+def load_moralis(
+    path: Path,
+) -> tuple[int, str]:
+
     if not path.is_file():
         raise ReconciliationError(
             f"Moralis dosyası bulunamadı: {path}"
         )
 
     raw_bytes = path.read_bytes()
+
     is_gzip = raw_bytes[:2] == b"\x1f\x8b"
     opener = gzip.open if is_gzip else open
 
@@ -105,16 +145,19 @@ def load_moralis(path: Path) -> tuple[int, str]:
         encoding="utf-8",
         newline="",
     ) as handle:
+
         reader = csv.DictReader(handle)
 
-        required = {
+        required_columns = {
             "token_address",
             "graduated_at_utc",
         }
 
         if (
             not reader.fieldnames
-            or not required.issubset(reader.fieldnames)
+            or not required_columns.issubset(
+                set(reader.fieldnames)
+            )
         ):
             raise ReconciliationError(
                 "Moralis CSV kolonları eksik: "
@@ -138,25 +181,27 @@ def load_moralis(path: Path) -> tuple[int, str]:
 
             if not token_address or not graduated_at:
                 raise ReconciliationError(
-                    f"Moralis CSV geçersiz satır: "
+                    "Moralis CSV geçersiz satır: "
                     f"{row_number}"
                 )
 
             if token_address in seen:
                 raise ReconciliationError(
-                    f"Moralis CSV duplicate mint: "
+                    "Moralis CSV duplicate mint: "
                     f"{token_address}"
                 )
 
             seen.add(token_address)
             row_count += 1
 
-    sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    sha256 = hashlib.sha256(
+        raw_bytes
+    ).hexdigest()
 
     return row_count, sha256
 
 
-def migration_sql(table: str) -> str:
+def migration_sql() -> str:
     return f"""
     SELECT
       block_timestamp AS migrated_at_utc,
@@ -176,7 +221,7 @@ def migration_sql(table: str) -> str:
         WHEN data = @withdraw_data
           THEN 'withdraw'
       END AS migration_type
-    FROM `{table}`
+    FROM `{INSTRUCTIONS_TABLE}`
     WHERE block_timestamp >= @start_timestamp
       AND block_timestamp < @end_timestamp
       AND program_id = @program_id
@@ -187,7 +232,9 @@ def migration_sql(table: str) -> str:
 def dry_run_config(
     start: datetime,
     end: datetime,
+    maximum_bytes_billed: int,
 ) -> bigquery.QueryJobConfig:
+
     return bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter(
@@ -226,66 +273,7 @@ def dry_run_config(
         ],
         dry_run=True,
         use_query_cache=False,
-    )
-
-
-def find_accessible_table_and_estimate(
-    client: bigquery.Client,
-    start: datetime,
-    end: datetime,
-) -> tuple[str, int]:
-    failures: list[dict[str, str]] = []
-
-    for table in INSTRUCTIONS_TABLE_CANDIDATES:
-        try:
-            job = client.query(
-                migration_sql(table),
-                job_config=dry_run_config(
-                    start,
-                    end,
-                ),
-                location="US",
-            )
-
-            estimated_bytes = int(
-                job.total_bytes_processed or 0
-            )
-
-            print(
-                f"RESOLVED_INSTRUCTIONS_TABLE={table}",
-                flush=True,
-            )
-
-            return table, estimated_bytes
-
-        except (
-            gexc.Forbidden,
-            gexc.NotFound,
-            gexc.BadRequest,
-        ) as exc:
-            failures.append(
-                {
-                    "table": table,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-            )
-
-    print(
-        json.dumps(
-            {
-                "bigquery_table_attempts": failures,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        file=sys.stderr,
-        flush=True,
-    )
-
-    raise ReconciliationError(
-        "Denenen Instructions tablolarının "
-        "hiçbirine erişilemedi."
+        maximum_bytes_billed=maximum_bytes_billed,
     )
 
 
@@ -293,6 +281,7 @@ def write_json(
     path: Path,
     payload: dict[str, Any],
 ) -> None:
+
     path.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -322,8 +311,7 @@ def main() -> int:
 
     if not args.dry_run_only:
         raise ReconciliationError(
-            "Bu güvenli sürüm yalnız "
-            "--dry-run-only ile çalışır."
+            "Bu sürüm yalnız --dry-run-only ile çalışır."
         )
 
     start, end = utc_bounds(
@@ -343,12 +331,18 @@ def main() -> int:
         project=args.project
     )
 
-    table, estimated_bytes = (
-        find_accessible_table_and_estimate(
-            client,
+    job = client.query(
+        migration_sql(),
+        job_config=dry_run_config(
             start,
             end,
-        )
+            args.maximum_bytes_billed,
+        ),
+        location=BIGQUERY_LOCATION,
+    )
+
+    estimated_bytes = int(
+        job.total_bytes_processed or 0
     )
 
     within_limit = (
@@ -368,7 +362,8 @@ def main() -> int:
             "sha256": sha256,
         },
         "bigquery": {
-            "instructions_table": table,
+            "location": BIGQUERY_LOCATION,
+            "instructions_table": INSTRUCTIONS_TABLE,
             "estimated_migration_query_bytes": (
                 estimated_bytes
             ),
@@ -422,4 +417,5 @@ if __name__ == "__main__":
             f"RECONCILIATION_ERROR: {exc}",
             file=sys.stderr,
         )
+
         raise SystemExit(4) from exc
