@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-SCRIPT_VERSION = "2026-07-20-gmgn-ath-scan-v1"
+SCRIPT_VERSION = "2026-07-20-gmgn-ath-scan-v2"
 DEFAULT_HOST = "https://openapi.gmgn.ai"
 ATH_FIELD_PRIORITY = {
     "history_highest_market_cap": 0,
@@ -137,7 +137,13 @@ class GlobalRateLimiter:
 
 def read_candidates(path: Path) -> list[Candidate]:
     candidates: list[Candidate] = []
-    with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
+
+    with path.open("rb") as probe:
+        is_gzip = probe.read(2) == b"\\x1f\\x8b"
+
+    opener = gzip.open if is_gzip else open
+
+    with opener(path, "rt", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         required = {"candidate_index", "mint", "source_class"}
         missing = required - set(reader.fieldnames or [])
