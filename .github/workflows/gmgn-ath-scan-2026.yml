@@ -1,0 +1,157 @@
+name: GMGN ATH Scan 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests_per_second:
+        description: "GMGN istek hızı; değiştirme"
+        required: true
+        default: "6"
+        type: string
+      workers:
+        description: "Eşzamanlı worker; değiştirme"
+        required: true
+        default: "4"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: GMGN ATH alan doğrulaması
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dosyaları doğrula
+        run: |
+          set -euo pipefail
+          test -f scripts/gmgn_ath_scan.py
+          test -f data/pumpfun_2026_candidate_universe.csv.gz
+          VERSION="$(python scripts/gmgn_ath_scan.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-20-gmgn-ath-scan-v1"
+          test -n "${GMGN_API_KEY:-}"
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: 60 token ile ATH alanını doğrula
+        run: |
+          set -euo pipefail
+          python -u scripts/gmgn_ath_scan.py \
+            --mode probe \
+            --input data/pumpfun_2026_candidate_universe.csv.gz \
+            --output-dir artifacts/gmgn-ath-probe \
+            --probe-size 60 \
+            --requests-per-second "${{ inputs.requests_per_second }}" \
+            --workers "${{ inputs.workers }}" \
+            --threshold-usd 10000000
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: Probe artifactini yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-ath-probe
+          path: artifacts/gmgn-ath-probe/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+
+  scan:
+    name: ATH shard ${{ matrix.shard }}
+    needs: probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shard taramasını çalıştır
+        run: |
+          set -euo pipefail
+          python -u scripts/gmgn_ath_scan.py \
+            --mode scan \
+            --input data/pumpfun_2026_candidate_universe.csv.gz \
+            --output-dir "artifacts/gmgn-ath-shard-${{ matrix.shard }}" \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 8 \
+            --requests-per-second "${{ inputs.requests_per_second }}" \
+            --workers "${{ inputs.workers }}" \
+            --threshold-usd 10000000
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: Shard artifactini yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-ath-shard-${{ matrix.shard }}
+          path: artifacts/gmgn-ath-shard-${{ matrix.shard }}/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+
+  merge:
+    name: ATH sonuçlarını birleştir
+    needs: scan
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Repoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shard artifactlerini indir
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gmgn-ath-shard-*
+          path: artifacts/downloaded
+          merge-multiple: false
+
+      - name: Sonuçları birleştir
+        run: |
+          set -euo pipefail
+          python -u scripts/gmgn_ath_scan.py \
+            --mode merge \
+            --input-root artifacts/downloaded \
+            --output-dir artifacts/gmgn-ath-combined \
+            --expected-shards 8
+
+      - name: Birleşik artifacti yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmgn-ath-2026-combined
+          path: artifacts/gmgn-ath-combined/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
