@@ -1,6 +1,6 @@
-"""Moralis Pump.fun mezun token listesini BigQuery ile güvenli şekilde test eder.
+"""Transactions tablosunun BigQuery tarama boyutunu güvenli dry-run ile ölçer.
 
-Bu sürüm yalnızca dry-run yapar ve veri indirmez.
+Gerçek veri sorgusu çalıştırmaz ve BigQuery kotasından veri tüketmez.
 """
 
 from __future__ import annotations
@@ -13,24 +13,23 @@ import json
 import sys
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from google.cloud import bigquery
+
 
 SCRIPT_VERSION = "2026-07-20-moralis-bigquery-reconciliation-v2"
 
 BIGQUERY_LOCATION = "us-central1"
 
-INSTRUCTIONS_TABLE = (
-    "bigquery-public-data.crypto_solana_mainnet_us.Instructions"
+TRANSACTIONS_TABLE = (
+    "bigquery-public-data."
+    "crypto_solana_mainnet_us."
+    "Transactions"
 )
 
-PUMP_PROGRAM_ID = (
-    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-)
-
-MIGRATE_DATA_B58 = "Mjb79tJwDb7"
-WITHDRAW_DATA_B58 = "Xd2GMpFXgQ1"
+# Önceki başarılı dry-run sonucunda ölçülen Instructions sorgusu.
+KNOWN_MIGRATION_ESTIMATE_BYTES = 770_154_556_161
 
 
 class ReconciliationError(RuntimeError):
@@ -116,13 +115,13 @@ def utc_bounds(
         tzinfo=timezone.utc,
     )
 
-    end = datetime.combine(
+    end_exclusive = datetime.combine(
         end_day + timedelta(days=1),
         dt_time.min,
         tzinfo=timezone.utc,
     )
 
-    return start, end
+    return start, end_exclusive
 
 
 def load_moralis(
@@ -201,38 +200,54 @@ def load_moralis(
     return row_count, sha256
 
 
-def migration_sql() -> str:
+def month_windows(
+    start: datetime,
+    end_exclusive: datetime,
+) -> Iterator[tuple[datetime, datetime]]:
+
+    current = start
+
+    while current < end_exclusive:
+        if current.month == 12:
+            next_month = datetime(
+                current.year + 1,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            )
+        else:
+            next_month = datetime(
+                current.year,
+                current.month + 1,
+                1,
+                tzinfo=timezone.utc,
+            )
+
+        segment_end = min(
+            next_month,
+            end_exclusive,
+        )
+
+        yield current, segment_end
+
+        current = segment_end
+
+
+def transactions_sql() -> str:
     return f"""
     SELECT
-      block_timestamp AS migrated_at_utc,
-      block_slot AS migration_block_slot,
-      tx_signature AS migration_tx,
-      index AS migration_instruction_index,
-      data AS migration_data,
-      CASE
-        WHEN data = @migrate_data
-          THEN accounts[SAFE_OFFSET(2)]
-        WHEN data = @withdraw_data
-          THEN accounts[SAFE_OFFSET(1)]
-      END AS mint,
-      CASE
-        WHEN data = @migrate_data
-          THEN 'migrate'
-        WHEN data = @withdraw_data
-          THEN 'withdraw'
-      END AS migration_type
-    FROM `{INSTRUCTIONS_TABLE}`
+      signature,
+      status,
+      err
+    FROM `{TRANSACTIONS_TABLE}`
     WHERE block_timestamp >= @start_timestamp
       AND block_timestamp < @end_timestamp
-      AND program_id = @program_id
-      AND data IN UNNEST(@migration_values)
     """
 
 
 def dry_run_config(
     start: datetime,
     end: datetime,
-    maximum_bytes_billed: int,
 ) -> bigquery.QueryJobConfig:
 
     return bigquery.QueryJobConfig(
@@ -247,33 +262,18 @@ def dry_run_config(
                 "TIMESTAMP",
                 end,
             ),
-            bigquery.ScalarQueryParameter(
-                "program_id",
-                "STRING",
-                PUMP_PROGRAM_ID,
-            ),
-            bigquery.ScalarQueryParameter(
-                "migrate_data",
-                "STRING",
-                MIGRATE_DATA_B58,
-            ),
-            bigquery.ScalarQueryParameter(
-                "withdraw_data",
-                "STRING",
-                WITHDRAW_DATA_B58,
-            ),
-            bigquery.ArrayQueryParameter(
-                "migration_values",
-                "STRING",
-                [
-                    MIGRATE_DATA_B58,
-                    WITHDRAW_DATA_B58,
-                ],
-            ),
         ],
         dry_run=True,
         use_query_cache=False,
-        maximum_bytes_billed=maximum_bytes_billed,
+    )
+
+
+def bytes_to_gib(
+    value: int,
+) -> float:
+    return round(
+        value / (1024 ** 3),
+        2,
     )
 
 
@@ -314,7 +314,7 @@ def main() -> int:
             "Bu sürüm yalnız --dry-run-only ile çalışır."
         )
 
-    start, end = utc_bounds(
+    start, end_exclusive = utc_bounds(
         args.start_date,
         args.end_date,
     )
@@ -331,22 +331,57 @@ def main() -> int:
         project=args.project
     )
 
-    job = client.query(
-        migration_sql(),
-        job_config=dry_run_config(
-            start,
-            end,
-            args.maximum_bytes_billed,
-        ),
-        location=BIGQUERY_LOCATION,
+    sql = transactions_sql()
+
+    monthly_estimates: list[dict[str, Any]] = []
+    transaction_total_bytes = 0
+
+    for month_start, month_end in month_windows(
+        start,
+        end_exclusive,
+    ):
+        job = client.query(
+            sql,
+            job_config=dry_run_config(
+                month_start,
+                month_end,
+            ),
+            location=BIGQUERY_LOCATION,
+        )
+
+        estimated_bytes = int(
+            job.total_bytes_processed or 0
+        )
+
+        transaction_total_bytes += estimated_bytes
+
+        monthly_estimates.append(
+            {
+                "start_utc": month_start.isoformat(),
+                "end_exclusive_utc": month_end.isoformat(),
+                "estimated_bytes": estimated_bytes,
+                "estimated_gib": bytes_to_gib(
+                    estimated_bytes
+                ),
+            }
+        )
+
+        print(
+            "TRANSACTIONS_MONTH_DRY_RUN "
+            f"{month_start.date()} "
+            f"{month_end.date()} "
+            f"{estimated_bytes} bytes "
+            f"({bytes_to_gib(estimated_bytes)} GiB)",
+            flush=True,
+        )
+
+    combined_bytes = (
+        KNOWN_MIGRATION_ESTIMATE_BYTES
+        + transaction_total_bytes
     )
 
-    estimated_bytes = int(
-        job.total_bytes_processed or 0
-    )
-
-    within_limit = (
-        estimated_bytes
+    within_transaction_limit = (
+        transaction_total_bytes
         <= args.maximum_bytes_billed
     )
 
@@ -354,7 +389,9 @@ def main() -> int:
         "script_version": SCRIPT_VERSION,
         "scope": {
             "start_utc": start.isoformat(),
-            "end_exclusive_utc": end.isoformat(),
+            "end_exclusive_utc": (
+                end_exclusive.isoformat()
+            ),
         },
         "moralis": {
             "file": str(moralis_path),
@@ -363,17 +400,50 @@ def main() -> int:
         },
         "bigquery": {
             "location": BIGQUERY_LOCATION,
-            "instructions_table": INSTRUCTIONS_TABLE,
-            "estimated_migration_query_bytes": (
-                estimated_bytes
+            "transactions_table": TRANSACTIONS_TABLE,
+            "estimate_type": (
+                "one_pass_selected_columns_upper_bound"
+            ),
+            "monthly_estimates": monthly_estimates,
+            "estimated_transactions_bytes": (
+                transaction_total_bytes
+            ),
+            "estimated_transactions_gib": (
+                bytes_to_gib(
+                    transaction_total_bytes
+                )
+            ),
+            "known_migration_estimate_bytes": (
+                KNOWN_MIGRATION_ESTIMATE_BYTES
+            ),
+            "known_migration_estimate_gib": (
+                bytes_to_gib(
+                    KNOWN_MIGRATION_ESTIMATE_BYTES
+                )
+            ),
+            "estimated_combined_bytes": (
+                combined_bytes
+            ),
+            "estimated_combined_gib": (
+                bytes_to_gib(
+                    combined_bytes
+                )
             ),
             "maximum_bytes_billed": (
                 args.maximum_bytes_billed
             ),
-            "within_hard_limit": within_limit,
+            "transaction_within_hard_limit": (
+                within_transaction_limit
+            ),
         },
-        "dry_run_only": True,
-        "complete": within_limit,
+        "assumptions": {
+            "dry_run_only": True,
+            "real_data_downloaded": False,
+            "quota_consumed_by_dry_run": False,
+            "estimate_scans_transactions_once": True,
+            "repeated_daily_signature_chunks_included": False,
+        },
+        "complete": True,
     }
 
     output_dir = Path(
@@ -381,7 +451,7 @@ def main() -> int:
     )
 
     write_json(
-        output_dir / "preflight.json",
+        output_dir / "transactions_preflight.json",
         report,
     )
 
@@ -394,15 +464,18 @@ def main() -> int:
         flush=True,
     )
 
-    if not within_limit:
+    if (
+        args.strict
+        and not within_transaction_limit
+    ):
         print(
-            "BIGQUERY_DRY_RUN_LIMIT_EXCEEDED",
+            "TRANSACTIONS_DRY_RUN_LIMIT_EXCEEDED",
             file=sys.stderr,
         )
         return 2
 
     print(
-        "MORALIS_BIGQUERY_RECONCILIATION_DRY_RUN_OK"
+        "MORALIS_BIGQUERY_TRANSACTIONS_DRY_RUN_OK"
     )
 
     return 0
