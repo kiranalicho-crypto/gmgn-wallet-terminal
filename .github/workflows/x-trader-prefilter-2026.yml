@@ -1,0 +1,148 @@
+name: X Trader Prefilter 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests_per_second:
+        description: "GMGN istek hızı; değiştirme"
+        required: true
+        default: "2.5"
+        type: string
+      workers:
+        description: "Eşzamanlı worker; değiştirme"
+        required: true
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: X trader alan doğrulaması
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dosyaları doğrula
+        run: |
+          set -euo pipefail
+          test -f scripts/x_trader_prefilter.py
+          test -f data/x_candidates_10m_plus_2026_corrected.csv
+          VERSION="$(python scripts/x_trader_prefilter.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-21-x-trader-prefilter-v1"
+          test -n "${GMGN_API_KEY:-}"
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: 8 tokenla trader alanlarını doğrula
+        run: |
+          set -euo pipefail
+          python -u scripts/x_trader_prefilter.py \
+            --mode probe \
+            --input data/x_candidates_10m_plus_2026_corrected.csv \
+            --output-dir artifacts/x-trader-probe \
+            --probe-size 8 \
+            --requests-per-second "${{ inputs.requests_per_second }}" \
+            --workers "${{ inputs.workers }}"
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: Probe artifactini yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-trader-probe
+          path: artifacts/x-trader-probe/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+
+  scan:
+    name: X trader shard ${{ matrix.shard }}
+    needs: probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shard taramasını çalıştır
+        run: |
+          set -euo pipefail
+          python -u scripts/x_trader_prefilter.py \
+            --mode scan \
+            --input data/x_candidates_10m_plus_2026_corrected.csv \
+            --output-dir "artifacts/x-trader-shard-${{ matrix.shard }}" \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 4 \
+            --requests-per-second "${{ inputs.requests_per_second }}" \
+            --workers "${{ inputs.workers }}"
+        env:
+          GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: Shard artifactini yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-trader-shard-${{ matrix.shard }}
+          path: artifacts/x-trader-shard-${{ matrix.shard }}/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+
+  merge:
+    name: X trader sonuçlarını birleştir
+    needs: scan
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: x-trader-shard-*
+          path: artifacts/downloaded
+          merge-multiple: false
+
+      - name: Sonuçları birleştir
+        run: |
+          set -euo pipefail
+          python -u scripts/x_trader_prefilter.py \
+            --mode merge \
+            --input-root artifacts/downloaded \
+            --output-dir artifacts/x-trader-combined \
+            --expected-shards 4
+
+      - name: Birleşik artifacti yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-trader-prefilter-2026-combined
+          path: artifacts/x-trader-combined/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
