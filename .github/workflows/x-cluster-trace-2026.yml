@@ -1,0 +1,207 @@
+name: X Token Flow Cluster Trace 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests_per_second:
+        description: "Solana RPC requests per second"
+        required: true
+        default: "1.0"
+      max_depth:
+        description: "A→B→C trace depth"
+        required: true
+        default: "3"
+      max_signature_pages:
+        description: "Maximum 1000-signature pages per token account"
+        required: true
+        default: "8"
+      max_signatures_per_node:
+        description: "Maximum signatures per traced wallet-token node"
+        required: true
+        default: "4000"
+      max_nodes_per_seed:
+        description: "Maximum linked wallets traced per seed"
+        required: true
+        default: "20"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: x-token-flow-cluster-trace-2026
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests solders
+
+      - name: Validate files and version
+        run: |
+          set -euo pipefail
+          test -f scripts/x_cluster_trace_2026.py
+          test -f data/x_cluster_trace_seeds_2026.csv
+          test -f data/x_chain_pair_results_2026.csv
+          VERSION="$(python scripts/x_cluster_trace_2026.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-21-x-cluster-trace-v1"
+          python - <<'PY'
+          import pandas as pd
+          seeds = pd.read_csv("data/x_cluster_trace_seeds_2026.csv")
+          pairs = pd.read_csv("data/x_chain_pair_results_2026.csv")
+          assert len(seeds) == 542, len(seeds)
+          assert len(pairs) == 542, len(pairs)
+          assert not seeds[["token_mint", "wallet"]].duplicated().any()
+          assert not pairs[["token_mint", "wallet"]].duplicated().any()
+          print("Seeds:", len(seeds))
+          print("Unique wallets:", seeds.wallet.nunique())
+          print("Unique X tokens:", seeds.token_mint.nunique())
+          PY
+
+  probe:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests solders
+
+      - name: Probe 8 seed pairs
+        env:
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+        run: |
+          set -euo pipefail
+          python scripts/x_cluster_trace_2026.py \
+            --mode probe \
+            --seeds data/x_cluster_trace_seeds_2026.csv \
+            --pairs data/x_chain_pair_results_2026.csv \
+            --output-dir output-probe \
+            --limit-pairs 8 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --max-depth '${{ inputs.max_depth }}' \
+            --max-signature-pages '${{ inputs.max_signature_pages }}' \
+            --max-signatures-per-node '${{ inputs.max_signatures_per_node }}' \
+            --max-nodes-per-seed '${{ inputs.max_nodes_per_seed }}'
+          python - <<'PY'
+          import json
+          r = json.load(open("output-probe/x_cluster_trace_report_probe.json"))
+          print(json.dumps(r, indent=2))
+          assert r["seed_pair_count"] == 8
+          assert r["status_counts"].get("ok", 0) >= 1, r
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-cluster-trace-probe-2026
+          path: output-probe/*
+          retention-days: 14
+
+  scan:
+    needs: probe
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests solders
+
+      - name: Scan shard ${{ matrix.shard }} of 4
+        env:
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+        run: |
+          set -euo pipefail
+          python scripts/x_cluster_trace_2026.py \
+            --mode scan \
+            --seeds data/x_cluster_trace_seeds_2026.csv \
+            --pairs data/x_chain_pair_results_2026.csv \
+            --output-dir 'output-shard-${{ matrix.shard }}' \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count 4 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --max-depth '${{ inputs.max_depth }}' \
+            --max-signature-pages '${{ inputs.max_signature_pages }}' \
+            --max-signatures-per-node '${{ inputs.max_signatures_per_node }}' \
+            --max-nodes-per-seed '${{ inputs.max_nodes_per_seed }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-cluster-trace-shard-${{ matrix.shard }}
+          path: output-shard-${{ matrix.shard }}/*
+          retention-days: 14
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests solders
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: x-cluster-trace-shard-*
+          path: downloaded
+          merge-multiple: true
+
+      - name: Merge cluster trace
+        run: |
+          set -euo pipefail
+          find downloaded -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+          python scripts/x_cluster_trace_2026.py \
+            --mode merge \
+            --input-dir downloaded \
+            --seeds data/x_cluster_trace_seeds_2026.csv \
+            --pairs data/x_chain_pair_results_2026.csv \
+            --output-dir output-combined
+          python - <<'PY'
+          import json
+          r = json.load(open("output-combined/x_cluster_trace_report_2026.json"))
+          print(json.dumps(r, indent=2))
+          assert r["found_shards"] == 4, r
+          assert r["original_seed_pair_count"] == 542, r
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-cluster-trace-2026-combined
+          path: output-combined/*
+          retention-days: 30
