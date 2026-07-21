@@ -21,7 +21,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-SCRIPT_VERSION = "2026-07-21-x-trader-prefilter-v1"
+SCRIPT_VERSION = "2026-07-21-x-trader-prefilter-v2"
 HOST = "https://openapi.gmgn.ai"
 OUTPUT_FIELDS = [
     "token_mint",
@@ -114,6 +114,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--requests-per-second", type=float, default=2.5)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--probe-size", type=int, default=8)
+    parser.add_argument("--ath-threshold-usd", type=float, default=10_000_000)
+    parser.add_argument("--ath-max-exclusive-usd", type=float, default=0)
+    parser.add_argument("--entry-mcap-max-usd", type=float, default=50_000)
+    parser.add_argument("--realized-multiple-min", type=float, default=25)
     parser.add_argument("--max-attempts", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=float, default=30)
     args = parser.parse_args()
@@ -129,9 +133,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--input-root required")
     return args
 
-def read_tokens(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+def read_tokens(
+    path: Path,
+    ath_threshold_usd: float,
+    ath_max_exclusive_usd: float,
+) -> list[dict[str, str]]:
+    with path.open("rb") as probe:
+        is_gzip = probe.read(2) == b"\x1f\x8b"
+
+    opener = gzip.open if is_gzip else open
+    with opener(path, "rt", encoding="utf-8", newline="") as handle:
+        all_rows = list(csv.DictReader(handle))
+
     required = {
         "mint",
         "symbol",
@@ -139,11 +152,31 @@ def read_tokens(path: Path) -> list[dict[str, str]]:
         "source_class",
         "corrected_ath_market_cap_usd",
         "supply_used",
+        "corrected_status",
     }
-    missing = required - set(rows[0].keys() if rows else [])
+    missing = required - set(all_rows[0].keys() if all_rows else [])
     if missing:
         raise RuntimeError(f"Input missing columns: {sorted(missing)}")
-    return rows
+
+    selected: list[dict[str, str]] = []
+    for row in all_rows:
+        if row.get("corrected_status") != "ok":
+            continue
+        ath_mc = number(row.get("corrected_ath_market_cap_usd"))
+        if ath_mc is None or ath_mc < ath_threshold_usd:
+            continue
+        if ath_max_exclusive_usd > 0 and ath_mc >= ath_max_exclusive_usd:
+            continue
+        selected.append(row)
+
+    if not selected:
+        raise RuntimeError(
+            "No tokens matched the configured ATH range: "
+            f"min={ath_threshold_usd}, "
+            f"max_exclusive={ath_max_exclusive_usd or 'none'}"
+        )
+    return selected
+
 
 def choose_probe(rows: list[dict[str, str]], size: int) -> list[dict[str, str]]:
     ordered = sorted(
@@ -307,7 +340,13 @@ def request_traders(
         "raw": None,
     }
 
-def transform(token: dict[str, str], item: dict[str, Any], source: str) -> dict[str, Any] | None:
+def transform(
+    token: dict[str, str],
+    item: dict[str, Any],
+    source: str,
+    entry_mcap_max_usd: float,
+    realized_multiple_min: float,
+) -> dict[str, Any] | None:
     wallet = str(item.get("address") or "").strip()
     if not wallet:
         return None
@@ -330,10 +369,19 @@ def transform(token: dict[str, str], item: dict[str, Any], source: str) -> dict[
         realized_total_multiple = sold_income / bought_cost
 
     ratio_pass = (
-        (realized_total_multiple is not None and realized_total_multiple >= 25)
-        or (realized_pnl is not None and realized_pnl >= 24)
+        (
+            realized_total_multiple is not None
+            and realized_total_multiple >= realized_multiple_min
+        )
+        or (
+            realized_pnl is not None
+            and realized_pnl >= realized_multiple_min - 1
+        )
     )
-    entry_pass = avg_entry_mc is not None and avg_entry_mc < 50_000
+    entry_pass = (
+        avg_entry_mc is not None
+        and avg_entry_mc < entry_mcap_max_usd
+    )
     profit_pass = realized_profit is not None and realized_profit > 0
     preliminary_pass = ratio_pass and entry_pass and profit_pass
 
@@ -406,7 +454,13 @@ def write_outputs(
             for item in response["items"]:
                 if not isinstance(item, dict):
                     continue
-                row = transform(response["token"], item, response["query_source"])
+                row = transform(
+                    response["token"],
+                    item,
+                    response["query_source"],
+                    args.entry_mcap_max_usd,
+                    args.realized_multiple_min,
+                )
                 if row is None:
                     continue
                 key = (row["token_mint"], row["wallet"])
@@ -438,6 +492,12 @@ def write_outputs(
         "script_version": SCRIPT_VERSION,
         "mode": args.mode,
         "label": label,
+        "configured_filters": {
+            "ath_threshold_usd": args.ath_threshold_usd,
+            "ath_max_exclusive_usd": args.ath_max_exclusive_usd,
+            "entry_mcap_max_usd": args.entry_mcap_max_usd,
+            "realized_multiple_min": args.realized_multiple_min,
+        },
         "response_status_counts": dict(sorted(response_status.items())),
         "unique_token_wallet_rows": len(rows),
         "recognized_cost_and_realized_profit_rows": recognized,
@@ -461,7 +521,11 @@ def run_query(args: argparse.Namespace) -> int:
         return 10
 
     force_ipv4()
-    tokens = read_tokens(Path(args.input))
+    tokens = read_tokens(
+        Path(args.input),
+        args.ath_threshold_usd,
+        args.ath_max_exclusive_usd,
+    )
     if args.mode == "probe":
         selected = choose_probe(tokens, args.probe_size)
         label = "probe"
