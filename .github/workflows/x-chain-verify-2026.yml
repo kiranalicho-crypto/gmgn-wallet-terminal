@@ -1,0 +1,181 @@
+name: X Chain Verify 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests_per_second:
+        description: "Moralis request rate"
+        required: true
+        default: "1.5"
+      entry_mcap_max_usd:
+        description: "Eligible X buy market-cap ceiling"
+        required: true
+        default: "50000"
+      realized_multiple_min:
+        description: "Minimum realized FIFO lot multiple"
+        required: true
+        default: "25"
+      min_sale_usd:
+        description: "Minimum matched sale income for a passing lot (0 = disabled)"
+        required: true
+        default: "0"
+      max_pages_per_pair:
+        description: "Maximum Moralis pages per wallet-token pair"
+        required: true
+        default: "20"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: x-chain-verify-2026
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate files, version, input and secret
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -f scripts/x_chain_verify_2026.py
+          test -f data/x_chain_verification_input_2026.csv
+          VERSION="$(python scripts/x_chain_verify_2026.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-21-x-chain-verify-v1"
+          test -n "${MORALIS_API_KEY:-}"
+          python - <<'PY'
+          import pandas as pd
+          p = "data/x_chain_verification_input_2026.csv"
+          df = pd.read_csv(p)
+          required = {"token_mint", "wallet", "token_supply_used"}
+          missing = sorted(required - set(df.columns))
+          assert not missing, missing
+          assert len(df) == 542, len(df)
+          assert not df[["token_mint", "wallet"]].duplicated().any()
+          assert df["token_supply_used"].notna().all()
+          print("Input pairs:", len(df))
+          print("Unique wallets:", df.wallet.nunique())
+          print("Unique X tokens:", df.token_mint.nunique())
+          PY
+
+  probe:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas requests
+      - name: Probe 9 wallet-token pairs
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/x_chain_verify_2026.py \
+            --mode probe \
+            --input data/x_chain_verification_input_2026.csv \
+            --output-dir output-probe \
+            --limit-pairs 9 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --entry-mcap-max-usd '${{ inputs.entry_mcap_max_usd }}' \
+            --realized-multiple-min '${{ inputs.realized_multiple_min }}' \
+            --min-sale-usd '${{ inputs.min_sale_usd }}' \
+            --max-pages '${{ inputs.max_pages_per_pair }}'
+          python - <<'PY'
+          import json
+          r = json.load(open("output-probe/x_chain_verify_report_probe.json"))
+          print(json.dumps(r, indent=2))
+          good = r.get("status_counts", {}).get("ok", 0)
+          assert good >= 1, "Probe produced no successful Moralis response"
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-chain-verify-probe
+          path: output-probe/*
+          retention-days: 14
+
+  scan:
+    needs: probe
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas requests
+      - name: Scan shard ${{ matrix.shard }} of 4
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/x_chain_verify_2026.py \
+            --mode scan \
+            --input data/x_chain_verification_input_2026.csv \
+            --output-dir 'output-shard-${{ matrix.shard }}' \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count 4 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --entry-mcap-max-usd '${{ inputs.entry_mcap_max_usd }}' \
+            --realized-multiple-min '${{ inputs.realized_multiple_min }}' \
+            --min-sale-usd '${{ inputs.min_sale_usd }}' \
+            --max-pages '${{ inputs.max_pages_per_pair }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-chain-verify-shard-${{ matrix.shard }}
+          path: output-shard-${{ matrix.shard }}/*
+          retention-days: 14
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas requests
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: x-chain-verify-shard-*
+          path: downloaded
+          merge-multiple: true
+      - name: Merge four shards
+        run: |
+          set -euo pipefail
+          find downloaded -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+          python scripts/x_chain_verify_2026.py \
+            --mode merge \
+            --input-dir downloaded \
+            --output-dir output-combined
+          python - <<'PY'
+          import json
+          r = json.load(open("output-combined/x_chain_verify_report_2026.json"))
+          print(json.dumps(r, indent=2))
+          assert r["found_shards"] == 4, r["found_shards"]
+          assert r["pair_count"] == 542, r["pair_count"]
+          assert r["cluster_trace_seed_count"] == 542
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-chain-verify-2026-combined
+          path: output-combined/*
+          retention-days: 30
