@@ -8,6 +8,26 @@ on:
         required: true
         default: "2.5"
         type: string
+      ath_threshold_usd:
+        description: "X token minimum ATH market cap"
+        required: true
+        default: "10000000"
+        type: string
+      ath_max_exclusive_usd:
+        description: "Opsiyonel ATH üst sınırı; yoksa 0"
+        required: true
+        default: "0"
+        type: string
+      entry_mcap_max_usd:
+        description: "X giriş market cap üst sınırı"
+        required: true
+        default: "50000"
+        type: string
+      realized_multiple_min:
+        description: "X minimum gerçekleşmiş toplam çarpan"
+        required: true
+        default: "25"
+        type: string
       workers:
         description: "Eşzamanlı worker; değiştirme"
         required: true
@@ -24,9 +44,11 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Repoyu indir
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -34,24 +56,51 @@ jobs:
         run: |
           set -euo pipefail
           test -f scripts/x_trader_prefilter.py
-          test -f data/x_candidates_10m_plus_2026_corrected.csv
+          test -f data/gmgn_ath_results_2026_corrected_part_01.csv
+          test -f data/gmgn_ath_results_2026_corrected_part_02.csv
+          test -f data/gmgn_ath_results_2026_corrected_part_03.csv
           VERSION="$(python scripts/x_trader_prefilter.py --version)"
           echo "Script version: $VERSION"
-          test "$VERSION" = "2026-07-21-x-trader-prefilter-v1"
+          test "$VERSION" = "2026-07-21-x-trader-prefilter-v2"
           test -n "${GMGN_API_KEY:-}"
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
+
+      - name: ATH CSV parçalarını birleştir
+        run: |
+          set -euo pipefail
+          head -n 1 data/gmgn_ath_results_2026_corrected_part_01.csv \
+            > data/gmgn_ath_results_2026_corrected.csv
+          tail -q -n +2 \
+            data/gmgn_ath_results_2026_corrected_part_01.csv \
+            data/gmgn_ath_results_2026_corrected_part_02.csv \
+            data/gmgn_ath_results_2026_corrected_part_03.csv \
+            >> data/gmgn_ath_results_2026_corrected.csv
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+          path = Path("data/gmgn_ath_results_2026_corrected.csv")
+          with path.open("r", encoding="utf-8", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+          assert len(rows) == 87604, len(rows)
+          assert len({row["mint"] for row in rows}) == 87604
+          print("ATH_COMBINED_OK rows=87604")
+          PY
 
       - name: 8 tokenla trader alanlarını doğrula
         run: |
           set -euo pipefail
           python -u scripts/x_trader_prefilter.py \
             --mode probe \
-            --input data/x_candidates_10m_plus_2026_corrected.csv \
+            --input data/gmgn_ath_results_2026_corrected.csv \
             --output-dir artifacts/x-trader-probe \
             --probe-size 8 \
             --requests-per-second "${{ inputs.requests_per_second }}" \
-            --workers "${{ inputs.workers }}"
+            --workers "${{ inputs.workers }}" \
+            --ath-threshold-usd "${{ inputs.ath_threshold_usd }}" \
+            --ath-max-exclusive-usd "${{ inputs.ath_max_exclusive_usd }}" \
+            --entry-mcap-max-usd "${{ inputs.entry_mcap_max_usd }}" \
+            --realized-multiple-min "${{ inputs.realized_multiple_min }}"
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
 
@@ -78,23 +127,50 @@ jobs:
         shard: [0, 1, 2, 3]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Repoyu indir
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: ATH CSV parçalarını birleştir
+        run: |
+          set -euo pipefail
+          head -n 1 data/gmgn_ath_results_2026_corrected_part_01.csv \
+            > data/gmgn_ath_results_2026_corrected.csv
+          tail -q -n +2 \
+            data/gmgn_ath_results_2026_corrected_part_01.csv \
+            data/gmgn_ath_results_2026_corrected_part_02.csv \
+            data/gmgn_ath_results_2026_corrected_part_03.csv \
+            >> data/gmgn_ath_results_2026_corrected.csv
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+          path = Path("data/gmgn_ath_results_2026_corrected.csv")
+          with path.open("r", encoding="utf-8", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+          assert len(rows) == 87604, len(rows)
+          assert len({row["mint"] for row in rows}) == 87604
+          print("ATH_COMBINED_OK rows=87604")
+          PY
 
       - name: Shard taramasını çalıştır
         run: |
           set -euo pipefail
           python -u scripts/x_trader_prefilter.py \
             --mode scan \
-            --input data/x_candidates_10m_plus_2026_corrected.csv \
+            --input data/gmgn_ath_results_2026_corrected.csv \
             --output-dir "artifacts/x-trader-shard-${{ matrix.shard }}" \
             --shard-index "${{ matrix.shard }}" \
             --shard-count 4 \
             --requests-per-second "${{ inputs.requests_per_second }}" \
-            --workers "${{ inputs.workers }}"
+            --workers "${{ inputs.workers }}" \
+            --ath-threshold-usd "${{ inputs.ath_threshold_usd }}" \
+            --ath-max-exclusive-usd "${{ inputs.ath_max_exclusive_usd }}" \
+            --entry-mcap-max-usd "${{ inputs.entry_mcap_max_usd }}" \
+            --realized-multiple-min "${{ inputs.realized_multiple_min }}"
         env:
           GMGN_API_KEY: ${{ secrets.GMGN_API_KEY }}
 
@@ -116,13 +192,16 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Repoyu indir
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - uses: actions/download-artifact@v4
+      - name: Shard artifactlerini indir
+        uses: actions/download-artifact@v4
         with:
           pattern: x-trader-shard-*
           path: artifacts/downloaded
