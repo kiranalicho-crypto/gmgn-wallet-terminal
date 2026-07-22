@@ -1,0 +1,197 @@
+name: Y Realized PnL Scan 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      y_realized_profit_min_usd:
+        description: "Different Y token minimum realized PnL; can later be changed without API rescan"
+        required: true
+        default: "75000"
+      min_matched_sell_coverage:
+        description: "Minimum same-wallet sell quantity matched to same-wallet buys"
+        required: true
+        default: "0.98"
+      requests_per_second:
+        description: "Moralis requests per second"
+        required: true
+        default: "1.5"
+      max_pages_per_wallet:
+        description: "Maximum 100-swap pages per wallet"
+        required: true
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: y-realized-pnl-scan-2026
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Validate script, input and secret
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -f scripts/y_realized_pnl_scan_2026.py
+          test -f data/x_chain_strict_pass_2026.csv
+          VERSION="$(python scripts/y_realized_pnl_scan_2026.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-22-y-realized-pnl-scan-v1"
+          test -n "${MORALIS_API_KEY:-}"
+          python - <<'PY'
+          import csv
+          p = "data/x_chain_strict_pass_2026.csv"
+          rows = list(csv.DictReader(open(p, encoding="utf-8-sig")))
+          required = {"token_mint", "wallet", "strict_direct_swap_pass", "strict_clean_pass"}
+          missing = sorted(required - set(rows[0] if rows else []))
+          assert not missing, missing
+          assert len(rows) == 239, len(rows)
+          assert len({r["wallet"] for r in rows}) == 227
+          assert all(r["token_mint"] and r["wallet"] for r in rows)
+          print("Strict X pairs:", len(rows))
+          print("Strict X wallets:", len({r['wallet'] for r in rows}))
+          print("Strict clean X pairs:", sum(r['strict_clean_pass'].lower() == 'true' for r in rows))
+          PY
+
+  probe:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Probe 5 wallets
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/y_realized_pnl_scan_2026.py \
+            --mode probe \
+            --input data/x_chain_strict_pass_2026.csv \
+            --output-dir output-probe \
+            --limit-wallets 5 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --max-pages-per-wallet '${{ inputs.max_pages_per_wallet }}' \
+            --y-realized-profit-min-usd '${{ inputs.y_realized_profit_min_usd }}' \
+            --min-matched-sell-coverage '${{ inputs.min_matched_sell_coverage }}'
+          python - <<'PY'
+          import json
+          r = json.load(open("output-probe/y_scan_report_probe.json"))
+          print(json.dumps(r, indent=2))
+          assert r["wallet_count"] == 5
+          assert r["status_counts"].get("ok", 0) >= 1, r
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: y-realized-pnl-probe-2026
+          path: output-probe/*
+          retention-days: 14
+
+  scan:
+    needs: probe
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Scan shard ${{ matrix.shard }} of 4
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/y_realized_pnl_scan_2026.py \
+            --mode scan \
+            --input data/x_chain_strict_pass_2026.csv \
+            --output-dir 'output-shard-${{ matrix.shard }}' \
+            --shard-index '${{ matrix.shard }}' \
+            --shard-count 4 \
+            --requests-per-second '${{ inputs.requests_per_second }}' \
+            --max-pages-per-wallet '${{ inputs.max_pages_per_wallet }}' \
+            --y-realized-profit-min-usd '${{ inputs.y_realized_profit_min_usd }}' \
+            --min-matched-sell-coverage '${{ inputs.min_matched_sell_coverage }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: y-realized-pnl-shard-${{ matrix.shard }}
+          path: output-shard-${{ matrix.shard }}/*
+          retention-days: 14
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: y-realized-pnl-shard-*
+          path: downloaded
+          merge-multiple: true
+
+      - name: Merge and filter Y results
+        run: |
+          set -euo pipefail
+          find downloaded -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+          python scripts/y_realized_pnl_scan_2026.py \
+            --mode merge \
+            --input data/x_chain_strict_pass_2026.csv \
+            --input-root downloaded \
+            --output-dir output-combined \
+            --expected-shards 4 \
+            --y-realized-profit-min-usd '${{ inputs.y_realized_profit_min_usd }}' \
+            --min-matched-sell-coverage '${{ inputs.min_matched_sell_coverage }}'
+          python - <<'PY'
+          import json
+          r = json.load(open("output-combined/y_scan_report_2026.json"))
+          print(json.dumps(r, indent=2))
+          assert r["found_shards"] == 4, r
+          assert r["strict_x_pair_count"] == 239, r
+          assert r["strict_x_wallet_count"] == 227, r
+          assert r["wallet_status_count"] == 227, r
+          assert r["same_wallet_only"] is True
+          assert r["cluster_results_used"] is False
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: y-realized-pnl-2026-combined
+          path: output-combined/*
+          retention-days: 30
