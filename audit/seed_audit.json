@@ -1,0 +1,8 @@
+{
+  "seed_rows": 239,
+  "unique_wallets": 227,
+  "strict_direct_swap_pass_rows": 239,
+  "strict_clean_pass_rows_not_used": 86,
+  "decision": "Use all 227 strict_direct_swap_pass wallets; ignore strict_clean_pass for selection.",
+  "important_gap": "The current source does not contain trader_nosell wallets."
+}
