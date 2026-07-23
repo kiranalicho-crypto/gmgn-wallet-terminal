@@ -1,0 +1,45 @@
+name: Birdeye Moralis 5 Wallet Compare 2026
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Validate files
+        run: |
+          set -euo pipefail
+          test -f scripts/birdeye_moralis_5_wallet_compare_2026.py
+          test -f data/birdeye_moralis_compare_wallets.csv
+          test "$(find data/moralis_events -maxdepth 1 -name '*.csv.gz' | wc -l)" -eq 5
+
+      - name: Run five-wallet comparison
+        env:
+          BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${BIRDEYE_API_KEY:-}"
+          python scripts/birdeye_moralis_5_wallet_compare_2026.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: birdeye-moralis-5-wallet-compare-2026
+          path: output-birdeye-moralis-5-wallet-compare/*
+          if-no-files-found: warn
+          retention-days: 14
