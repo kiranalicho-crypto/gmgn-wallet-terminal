@@ -1,0 +1,40 @@
+name: Birdeye Details Retry 2026
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  details-retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Run Birdeye Details retry test
+        env:
+          BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${BIRDEYE_API_KEY:-}"
+          test -f scripts/birdeye_details_retry_2026.py
+          test -f data/birdeye_test_wallet.txt
+          python scripts/birdeye_details_retry_2026.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: birdeye-details-retry-2026
+          path: output-birdeye-details-retry/*
+          if-no-files-found: warn
+          retention-days: 14
