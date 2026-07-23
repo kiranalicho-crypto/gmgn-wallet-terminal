@@ -1,0 +1,37 @@
+name: Birdeye Access Test 2026 v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  access-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Run corrected one-wallet Birdeye access test
+        env:
+          BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${BIRDEYE_API_KEY:-}"
+          test -f scripts/birdeye_access_test_2026.py
+          test -f data/birdeye_test_wallet.txt
+          python scripts/birdeye_access_test_2026.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: birdeye-access-test-2026-v2
+          path: output-birdeye-access-test/*
+          retention-days: 14
