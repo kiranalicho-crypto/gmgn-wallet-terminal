@@ -1,0 +1,55 @@
+name: Helius Moralis Probe 2026
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Validate files and secret
+        env:
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${HELIUS_API_KEY:-}"
+          test -f scripts/helius_moralis_probe_2026.py
+          test -f data/helius_probe_wallets_5.csv
+          test -f data/moralis_probe_baseline_5_wallets.csv
+          VERSION="$(python scripts/helius_moralis_probe_2026.py --version)"
+          echo "Script version: $VERSION"
+          test "$VERSION" = "2026-07-23-helius-moralis-probe-v1"
+
+      - name: Compare five completed wallets
+        env:
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/helius_moralis_probe_2026.py \
+            --wallets data/helius_probe_wallets_5.csv \
+            --baseline data/moralis_probe_baseline_5_wallets.csv \
+            --output-dir output-helius-probe \
+            --requests-per-second 1.0 \
+            --max-pages-per-wallet 25
+          cat output-helius-probe/helius_moralis_probe_report.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helius-moralis-probe-2026
+          path: output-helius-probe/*
+          retention-days: 14
