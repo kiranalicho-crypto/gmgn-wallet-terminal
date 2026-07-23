@@ -1,0 +1,68 @@
+name: Birdeye 227 Wallet Prefilter 2026
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prefilter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Validate package
+        run: |
+          set -euo pipefail
+          test -f scripts/birdeye_227_wallet_prefilter_2026.py
+          test -f data/x_227_wallet_seed_2026.csv
+          VERSION="$(python scripts/birdeye_227_wallet_prefilter_2026.py --version)"
+          echo "$VERSION"
+          test "$VERSION" = "2026-07-24-birdeye-227-wallet-prefilter-v3"
+
+      - name: Run 227-wallet Birdeye scan
+        env:
+          BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${BIRDEYE_API_KEY:-}"
+          python -u scripts/birdeye_227_wallet_prefilter_2026.py \
+            --input data/x_227_wallet_seed_2026.csv \
+            --output-dir output-birdeye-227-wallet-prefilter \
+            --request-spacing-seconds 3
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: birdeye-227-wallet-prefilter-2026
+          path: output-birdeye-227-wallet-prefilter/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Completeness gate
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("output-birdeye-227-wallet-prefilter/birdeye_227_wallet_prefilter_report.json")
+          if not path.is_file():
+              raise SystemExit("Report missing.")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          if report.get("complete") is not True:
+              raise SystemExit("Some wallets are incomplete; inspect artifact.")
+          print("BIRDEYE_227_WALLET_PREFILTER_OK")
+          PY
