@@ -1,0 +1,42 @@
+FIVE-WALLET BIRDEYE–MORALIS RESULT REVIEW
+
+Observed
+--------
+Wallets: 5
+Unified token rows: 374
+Rows present in both providers: 361
+Birdeye-only rows: 13
+Rows with >10% realized-PnL disagreement: 102
+Absolute difference > $50: 49
+Absolute difference > $500: 4
+Maximum absolute difference: about $2,025 (SOL/base asset)
+Moralis unmatched-sell anomalies: 85 tokens
+Moralis same-tx same-side multi-leg anomalies: 16 tokens
+
+Positive validation
+-------------------
+The five X-token closed positions agree very closely between providers:
+approximately 0.02% to 0.48% realized-profit difference.
+This supports Birdeye as a candidate source for straightforward closed trades.
+
+Y result in sample
+------------------
+Neither provider found a different non-base token with realized profit >= $50K.
+The largest non-X Y-like result was about:
+- Birdeye: $6,414.55
+- Moralis FIFO: $6,401.52
+
+Critical correction
+-------------------
+The Birdeye raw response states meta.holding_check=false. The prior comparison
+used the returned holding value in a quantity reconciliation formula. Therefore
+the count of 26 "transfer or missing history" flags is not reliable and must not
+be used. The V2 bulk prefilter does not use holding, current value, or unrealized
+PnL to infer transfers.
+
+Decision
+--------
+Use Birdeye on all 83 corrected provisional wallets as a fast candidate
+generator with a $30K safety threshold. Do not declare final Y success or
+failure from Birdeye alone. Any candidate must be checked with a transfer-aware,
+transaction-ordered, on-chain FIFO ledger.
