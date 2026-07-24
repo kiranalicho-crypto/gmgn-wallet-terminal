@@ -1,0 +1,64 @@
+name: Moralis Daily XY Scan 2026
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_api_calls:
+        description: "Daily call budget. Keep 760 for 38,000 CU."
+        required: true
+        default: "760"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install requests
+
+      - name: Validate package
+        run: |
+          set -euo pipefail
+          test -f scripts/moralis_daily_xy_scan.py
+          test -f data/moralis_state_current.zip
+          test -f data/x_chain_strict_pass_2026.csv
+          VERSION="$(python scripts/moralis_daily_xy_scan.py --version)"
+          echo "$VERSION"
+          test "$VERSION" = "2026-07-24-moralis-daily-xy-scan-v3"
+
+      - name: Run daily Moralis scan
+        env:
+          MORALIS_API_KEY: ${{ secrets.MORALIS_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${MORALIS_API_KEY:-}"
+          python -u scripts/moralis_daily_xy_scan.py \
+            --max-api-calls "${{ inputs.max_api_calls }}" \
+            --request-interval-seconds 0.20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: moralis-daily-xy-scan-2026
+          path: output-moralis-daily-xy-scan/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Print final report
+        if: always()
+        run: |
+          if [ -f output-moralis-daily-xy-scan/run_report.json ]; then
+            cat output-moralis-daily-xy-scan/run_report.json
+          fi
