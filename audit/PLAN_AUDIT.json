@@ -1,0 +1,15 @@
+{
+  "version": "2026-07-24-moralis-daily-xy-scan-v3",
+  "total_x_wallets": 227,
+  "moralis_complete_before_run": 39,
+  "moralis_partial_before_run": 3,
+  "moralis_pending_before_run": 185,
+  "birdeye_complete_before_run": 36,
+  "complete_union_before_run": 70,
+  "discovery_priority_wallets": 157,
+  "daily_calls": 760,
+  "daily_expected_cu": 38000,
+  "daily_reserve_cu": 2000,
+  "search_threshold_usd": 50000,
+  "ranking": "X max proven realized multiple descending"
+}
