@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   scan:
@@ -27,17 +28,54 @@ jobs:
       - name: Install dependency
         run: python -m pip install requests
 
-      - name: Rebuild current Moralis state
+      - name: Restore state from latest successful artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          test -f data/moralis_state_current.zip.b64.part-001
-          cat data/moralis_state_current.zip.b64.part-* \
-            | base64 --decode > data/moralis_state_current.zip
-          EXPECTED_SHA256="f8f106549337eb3cef05734a4c8417716519c8a79eef3439f8e8120afdc6efa3"
+          ARTIFACTS_JSON="$(
+            curl --fail --silent --show-error \
+              --location \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=moralis-daily-xy-scan-2026&per_page=100"
+          )"
+          ARTIFACT_ID="$(
+            jq -r '
+              [
+                .artifacts[]
+                | select(.expired == false)
+              ]
+              | sort_by(.created_at)
+              | reverse
+              | .[0].id // empty
+            ' <<<"${ARTIFACTS_JSON}"
+          )"
+          test -n "${ARTIFACT_ID}"
+          echo "Restoring artifact id: ${ARTIFACT_ID}"
+
+          mkdir -p /tmp/moralis-previous
+          curl --fail --silent --show-error \
+            --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output /tmp/moralis-previous.zip
+          unzip -q /tmp/moralis-previous.zip -d /tmp/moralis-previous
+
+          STATE_SOURCE="$(
+            find /tmp/moralis-previous \
+              -type f \
+              -name moralis_state_updated.zip \
+              -print \
+              -quit
+          )"
+          test -n "${STATE_SOURCE}"
+          cp "${STATE_SOURCE}" data/moralis_state_current.zip
+
           ACTUAL_SHA256="$(sha256sum data/moralis_state_current.zip | awk '{print $1}')"
-          echo "Expected state SHA256: ${EXPECTED_SHA256}"
-          echo "Actual state SHA256:   ${ACTUAL_SHA256}"
-          test "${ACTUAL_SHA256}" = "${EXPECTED_SHA256}"
+          echo "Restored state SHA256: ${ACTUAL_SHA256}"
           python - <<'PY'
           import zipfile
           path = "data/moralis_state_current.zip"
@@ -45,6 +83,13 @@ jobs:
               bad = archive.testzip()
               if bad:
                   raise SystemExit(f"Corrupt state member: {bad}")
+              names = set(archive.namelist())
+              required = {"progress.json", "xy_scan_meta.json"}
+              missing = required - names
+              if missing:
+                  raise SystemExit(
+                      f"State is missing required files: {sorted(missing)}"
+                  )
               print(
                   f"State rebuilt successfully: "
                   f"{len(archive.infolist())} files"
