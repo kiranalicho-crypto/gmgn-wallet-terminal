@@ -27,6 +27,25 @@ jobs:
       - name: Install dependency
         run: python -m pip install requests
 
+      - name: Rebuild current Moralis state
+        run: |
+          set -euo pipefail
+          test -f data/moralis_state_current.zip.part-001
+          cat data/moralis_state_current.zip.part-* \
+            > data/moralis_state_current.zip
+          python - <<'PY'
+          import zipfile
+          path = "data/moralis_state_current.zip"
+          with zipfile.ZipFile(path) as archive:
+              bad = archive.testzip()
+              if bad:
+                  raise SystemExit(f"Corrupt state member: {bad}")
+              print(
+                  f"State rebuilt successfully: "
+                  f"{len(archive.infolist())} files"
+              )
+          PY
+
       - name: Validate package
         run: |
           set -euo pipefail
@@ -35,7 +54,7 @@ jobs:
           test -f data/x_chain_strict_pass_2026.csv
           VERSION="$(python scripts/moralis_daily_xy_scan.py --version)"
           echo "$VERSION"
-          test "$VERSION" = "2026-07-24-moralis-daily-xy-scan-v3"
+          test "$VERSION" = "2026-07-25-moralis-daily-xy-scan-v4-25k-resume"
 
       - name: Run daily Moralis scan
         env:
