@@ -30,9 +30,14 @@ jobs:
       - name: Rebuild current Moralis state
         run: |
           set -euo pipefail
-          test -f data/moralis_state_current.zip.part-001
-          cat data/moralis_state_current.zip.part-* \
-            > data/moralis_state_current.zip
+          test -f data/moralis_state_current.zip.b64.part-001
+          cat data/moralis_state_current.zip.b64.part-* \
+            | base64 --decode > data/moralis_state_current.zip
+          EXPECTED_SHA256="f8f106549337eb3cef05734a4c8417716519c8a79eef3439f8e8120afdc6efa3"
+          ACTUAL_SHA256="$(sha256sum data/moralis_state_current.zip | awk '{print $1}')"
+          echo "Expected state SHA256: ${EXPECTED_SHA256}"
+          echo "Actual state SHA256:   ${ACTUAL_SHA256}"
+          test "${ACTUAL_SHA256}" = "${EXPECTED_SHA256}"
           python - <<'PY'
           import zipfile
           path = "data/moralis_state_current.zip"
