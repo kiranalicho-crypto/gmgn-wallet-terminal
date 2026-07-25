@@ -19,7 +19,7 @@ from typing import Any
 
 import requests
 
-VERSION = "2026-07-24-moralis-daily-xy-scan-v3"
+VERSION = "2026-07-25-moralis-daily-xy-scan-v4-25k-resume"
 
 API_BASE = "https://solana-gateway.moralis.io/account/mainnet"
 STATE_ZIP = Path("data/moralis_state_current.zip")
@@ -38,7 +38,8 @@ BASE_MINTS = {
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 }
 BASE_SYMBOLS = {"SOL", "WSOL", "USDC", "USDT", "USD1", "PYUSD", "USDS"}
-THRESHOLDS = (30_000.0, 50_000.0, 60_000.0, 75_000.0)
+SEARCH_THRESHOLD_USD = 25_000.0
+THRESHOLDS = (25_000.0, 30_000.0, 50_000.0, 60_000.0, 75_000.0)
 
 EVENT_FIELDS = [
     "wallet",
@@ -698,7 +699,7 @@ def mark_qualified(
         "verification_status": "token_history_complete",
         "source": source,
         "qualified_at_utc": now_utc(),
-        "search_threshold_usd": 50_000,
+        "search_threshold_usd": SEARCH_THRESHOLD_USD,
     }
     if previous is None or (
         fnum(candidate["realized_profit_usd"]) or -math.inf
@@ -743,7 +744,9 @@ def resume_incomplete_token_verifications(
             meta,
             str(item.get("source") or "resume"),
         )
-        if result and (fnum(result["realized_profit_usd"]) or -math.inf) >= 50_000:
+        if result and (
+            fnum(result["realized_profit_usd"]) or -math.inf
+        ) >= SEARCH_THRESHOLD_USD:
             mark_qualified(
                 wallet,
                 result,
@@ -763,7 +766,7 @@ def verify_known_birdeye_candidates(
     today_new: set[str],
 ) -> None:
     # Highest Birdeye candidate first. Stop this wallet as soon as one Y token
-    # is fully verified at >= $50K.
+    # is fully verified at or above the active search threshold.
     ordered_wallets = sorted(
         candidates,
         key=lambda wallet: max(
@@ -781,7 +784,7 @@ def verify_known_birdeye_candidates(
             existing = qualified_y_rows(
                 wallet,
                 x_mints_by_wallet[wallet],
-                50_000,
+                SEARCH_THRESHOLD_USD,
             )
             if existing:
                 best = max(
@@ -813,7 +816,9 @@ def verify_known_birdeye_candidates(
             )
             if result is None:
                 return
-            if (fnum(result["realized_profit_usd"]) or -math.inf) >= 50_000:
+            if (
+                fnum(result["realized_profit_usd"]) or -math.inf
+            ) >= SEARCH_THRESHOLD_USD:
                 mark_qualified(
                     wallet,
                     result,
@@ -834,7 +839,11 @@ def analyze_existing_state(
     for wallet, item in progress["wallets"].items():
         if item.get("status") != "ok":
             continue
-        rows = qualified_y_rows(wallet, x_mints_by_wallet[wallet], 50_000)
+        rows = qualified_y_rows(
+            wallet,
+            x_mints_by_wallet[wallet],
+            SEARCH_THRESHOLD_USD,
+        )
         if not rows:
             continue
         best = max(
@@ -859,7 +868,9 @@ def provisional_candidate_tokens(
         for row in calculate_wallet_token_pnl(wallet, x_mints)
         if not row["is_x_token"]
         and not row["is_base_or_stable"]
-        and (fnum(row["realized_profit_usd"]) or -math.inf) >= 50_000
+        and (
+            fnum(row["realized_profit_usd"]) or -math.inf
+        ) >= SEARCH_THRESHOLD_USD
     ]
     rows.sort(
         key=lambda row: fnum(row["realized_profit_usd"]) or -math.inf,
@@ -878,12 +889,9 @@ def priority_wallets(
         for wallet, item in progress["wallets"].items()
         if item.get("status") == "ok"
     }
-    result = all_wallets - moralis_complete - birdeye_complete
-    if len(result) != 157:
-        raise RuntimeError(
-            f"Expected 157 discovery-priority wallets, found {len(result)}"
-        )
-    return result
+    # This set must shrink after every successful resume run. Never assert the
+    # original first-run count here: doing so makes a valid updated state crash.
+    return all_wallets - moralis_complete - birdeye_complete
 
 
 def scan_discovery_round_robin(
@@ -986,7 +994,9 @@ def scan_discovery_round_robin(
             )
             if result is None:
                 return
-            if (fnum(result["realized_profit_usd"]) or -math.inf) >= 50_000:
+            if (
+                fnum(result["realized_profit_usd"]) or -math.inf
+            ) >= SEARCH_THRESHOLD_USD:
                 mark_qualified(
                     wallet,
                     result,
@@ -1012,7 +1022,7 @@ def scan_discovery_round_robin(
             final_rows = qualified_y_rows(
                 wallet,
                 x_mints_by_wallet[wallet],
-                50_000,
+                SEARCH_THRESHOLD_USD,
             )
             if final_rows:
                 best = max(
@@ -1162,10 +1172,10 @@ def build_outputs(
 
     today_rows = [
         row
-        for row in wallet_rankings_by_threshold[50_000]
+        for row in wallet_rankings_by_threshold[int(SEARCH_THRESHOLD_USD)]
         if row["wallet"] in today_new
     ]
-    write_csv(OUTPUT_DIR / "today_new_qualified_50k_wallets.csv", today_rows)
+    write_csv(OUTPUT_DIR / "today_new_qualified_25k_wallets.csv", today_rows)
 
     progress_rows: list[dict[str, Any]] = []
     for wallet, item in progress["wallets"].items():
@@ -1177,8 +1187,8 @@ def build_outputs(
                 "api_raw_item_count_total": item.get(
                     "api_raw_item_count", 0
                 ),
-                "is_157_priority_wallet": wallet in priority,
-                "qualified_50k": wallet in meta["qualified_wallets"],
+                "is_discovery_priority_wallet": wallet in priority,
+                "qualified_25k": wallet in meta["qualified_wallets"],
                 "qualified_token_mint": meta["qualified_wallets"].get(
                     wallet, {}
                 ).get("token_mint", ""),
@@ -1196,8 +1206,8 @@ def build_outputs(
     priority_incomplete = [
         row
         for row in progress_rows
-        if row["is_157_priority_wallet"]
-        and not row["qualified_50k"]
+        if row["is_discovery_priority_wallet"]
+        and not row["qualified_25k"]
         and row["moralis_status"] != "ok"
     ]
     write_csv(
@@ -1220,10 +1230,10 @@ def build_outputs(
         "moralis_status_counts": dict(status_counts),
         "priority_wallet_count": len(priority),
         "remaining_priority_wallet_count": len(priority_incomplete),
-        "qualified_50k_total": len(
-            wallet_rankings_by_threshold[50_000]
+        "qualified_25k_total": len(
+            wallet_rankings_by_threshold[int(SEARCH_THRESHOLD_USD)]
         ),
-        "qualified_50k_new_this_run": len(today_rows),
+        "qualified_25k_new_this_run": len(today_rows),
         "threshold_wallet_counts": {
             str(threshold): len(rows)
             for threshold, rows in wallet_rankings_by_threshold.items()
@@ -1232,7 +1242,8 @@ def build_outputs(
             "x_already_passed_25x_for_227_wallets": True,
             "transfer_in_out_not_elimination": True,
             "excess_sells_ignored_not_zero_cost_profit": True,
-            "stop_only_the_wallet_after_one_complete_y_token_ge_50k": True,
+            "active_y_search_threshold_usd": SEARCH_THRESHOLD_USD,
+            "stop_only_the_wallet_after_one_complete_y_token_ge_25k": True,
             "continue_other_wallets_until_daily_budget": True,
             "ranking_by_x_best_realized_multiple_desc": True,
             "trader_nosell_not_in_current_source": True,
